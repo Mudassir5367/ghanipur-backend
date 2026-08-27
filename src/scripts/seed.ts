@@ -1,0 +1,120 @@
+/**
+ * Development seed (§62). Creates a Super Admin, a demo Shop Admin, and a demo Shop.
+ * Categories/products/customers/sales are added in later phases' seed steps.
+ * NEVER run automatically in production — this script refuses when NODE_ENV=production.
+ */
+import { connectDatabase, disconnectDatabase } from '../config/db.js';
+import { env } from '../config/env.js';
+import { logger } from '../config/logger.js';
+import { User } from '../models/user.model.js';
+import { Shop, ShopStatus } from '../models/shop.model.js';
+import { ShopSettings } from '../models/shopSettings.model.js';
+import { Category } from '../models/category.model.js';
+import { Product } from '../models/product.model.js';
+import { Role } from '../constants/roles.js';
+import { hashPassword } from '../services/token.service.js';
+import { slugify } from '../utils/slug.js';
+import { toMinor } from '../utils/money.js';
+import { ensureDefaultUnits } from '../modules/unit/unit.service.js';
+import { Unit } from '../models/unit.model.js';
+import { recordMovement } from '../services/inventory.service.js';
+import { InventoryTxnType, RefType } from '../constants/inventory.js';
+import { Expense } from '../models/expense.model.js';
+import { provisionShop } from '../modules/shop/shop.service.js';
+import { createCustomer } from '../modules/customer/customer.service.js';
+import { createSale } from '../modules/sale/sale.service.js';
+import { recordPayment } from '../modules/payment/payment.service.js';
+
+async function seed(): Promise<void> {
+  // Never auto-seed production data. In a prod-built image (e.g. Docker), an explicit
+  // ALLOW_SEED=true is required to seed a fresh/demo database on purpose.
+  if (env.isProd && process.env.ALLOW_SEED !== 'true') {
+    logger.error('Refusing to seed in production (set ALLOW_SEED=true to override)');
+    process.exit(1);
+  }
+  await connectDatabase();
+
+  const superEmail = 'superadmin@ghanipur.test';
+  const adminEmail = 'admin@ghanipur.test';
+  const password = 'password123';
+
+  // Clean slate for demo entities
+  const existingShop = await Shop.findOne({ slug: 'demo-dairy' });
+  if (existingShop) {
+    await Promise.all([
+      Category.deleteMany({ shopId: existingShop._id }),
+      Product.deleteMany({ shopId: existingShop._id }),
+      ShopSettings.deleteMany({ shopId: existingShop._id }),
+    ]);
+    await Shop.deleteOne({ _id: existingShop._id });
+  }
+  await User.deleteMany({ email: { $in: [superEmail, adminEmail] } });
+
+  const hash = await hashPassword(password);
+  await ensureDefaultUnits();
+  const litre = await Unit.findOne({ shopId: null, symbol: 'L' });
+  const kg = await Unit.findOne({ shopId: null, symbol: 'kg' });
+
+  await User.create({ name: 'Super Admin', email: superEmail, passwordHash: hash, role: Role.SUPER_ADMIN });
+
+  const admin = await User.create({
+    name: 'Demo Owner',
+    email: adminEmail,
+    passwordHash: hash,
+    role: Role.SHOP_ADMIN,
+    phone: '03001112222',
+  });
+  // Provision the shop with default settings + starter categories (§3), then activate it.
+  const shop = await provisionShop(undefined, admin, 'Demo Dairy', { phone: '03001112222', status: ShopStatus.ACTIVE });
+  admin.shopId = shop._id;
+  await admin.save();
+
+  // Products reference the seeded default categories (§62).
+  const ctx = { shopId: shop._id.toString(), impersonated: false };
+  const catByName = async (name: string) => (await Category.findOne({ shopId: shop._id, name }))!._id;
+  const milkCat = await catByName('Milk');
+  const yogurtCat = await catByName('Yogurt');
+  const gheeCat = await catByName('Desi Ghee');
+
+  const demoProducts = [
+    { name: 'Buffalo Milk', cat: milkCat, unit: litre!._id, sell: 250, cost: 210, open: 120, min: 20 },
+    { name: 'Cow Milk', cat: milkCat, unit: litre!._id, sell: 220, cost: 185, open: 80, min: 15 },
+    { name: 'Fresh Dahi', cat: yogurtCat, unit: kg!._id, sell: 300, cost: 240, open: 25, min: 5 },
+    { name: 'Pure Desi Ghee 1L', cat: gheeCat, unit: litre!._id, sell: 2600, cost: 2200, open: 15, min: 3 },
+  ];
+  let buffaloMilkId = '';
+  for (const p of demoProducts) {
+    const product = await Product.create({
+      shopId: shop._id, categoryId: p.cat, unitId: p.unit,
+      name: p.name, slug: slugify(p.name), sku: slugify(p.name).toUpperCase().replace(/-/g, ''),
+      sellingPriceMinor: toMinor(p.sell), purchaseCostMinor: toMinor(p.cost), minStock: p.min,
+    });
+    if (p.name === 'Buffalo Milk') buffaloMilkId = product._id.toString();
+    await recordMovement(ctx, { productId: product._id.toString(), type: InventoryTxnType.STOCK_IN, quantity: p.open, refType: RefType.PRODUCT, refId: product._id, performedBy: admin._id.toString(), note: 'Opening stock' });
+  }
+
+  // Customers + a credit sale + a partial payment (exercises the real services — §62)
+  const aliHotel = await createCustomer(ctx, { name: 'Ali Hotel', phone: '03009998888', type: 'HOTEL' }, admin._id.toString());
+  await createCustomer(ctx, { name: 'Bilal Household', phone: '03007776666', type: 'HOUSEHOLD' }, admin._id.toString());
+
+  await createSale(ctx, { type: 'CASH', items: [{ productId: buffaloMilkId, quantity: 15 }] }, admin._id.toString());
+  await createSale(ctx, { type: 'CREDIT', customerId: aliHotel._id.toString(), items: [{ productId: buffaloMilkId, quantity: 30 }] }, admin._id.toString());
+  await recordPayment(ctx, { customerId: aliHotel._id.toString(), amount: 3000, method: 'CASH' }, admin._id.toString());
+
+  await Expense.create([
+    { shopId: shop._id, category: 'Rent', amountMinor: toMinor(50000), createdBy: admin._id },
+    { shopId: shop._id, category: 'Electricity', amountMinor: toMinor(35000), createdBy: admin._id },
+  ]);
+
+  logger.info('✅ Seed complete');
+  logger.info(`   Super Admin:  ${superEmail} / ${password}`);
+  logger.info(`   Shop Admin:   ${adminEmail} / ${password}  (shop: ${shop.slug})`);
+
+  await disconnectDatabase();
+  process.exit(0);
+}
+
+seed().catch((err) => {
+  logger.fatal({ err }, 'Seed failed');
+  process.exit(1);
+});

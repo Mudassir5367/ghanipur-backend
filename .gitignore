@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+*.tsbuildinfo
+
+# runtime / uploads
+uploads/
+*.log
+
+# secrets & env (never commit real secrets)
+.env
+.env.local
+.env.*.local
+
+# tooling
+coverage/
+.DS_Store
