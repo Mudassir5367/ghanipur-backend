@@ -35,13 +35,23 @@ const schema = z.object({
   ADMIN_SETUP_KEY: z.string().min(8).optional(),       // create a shop admin
 
   // Password-reset OTP flow.
-  OTP_TTL_MIN: z.coerce.number().int().positive().default(10),          // OTP validity
-  OTP_RESEND_COOLDOWN_SEC: z.coerce.number().int().positive().default(60),
+  OTP_TTL_MIN: z.coerce.number().int().positive().default(2),           // OTP validity (minutes)
+  OTP_LENGTH: z.coerce.number().int().min(4).max(8).default(4),         // number of digits
+  OTP_RESEND_COOLDOWN_SEC: z.coerce.number().int().positive().default(120),
   OTP_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),      // wrong tries before lockout
   RESET_TOKEN_TTL_MIN: z.coerce.number().int().positive().default(15),  // window to set the new password
   // Local/dev only: echo the OTP in the API response so testing works without email.
   // MUST be false/unset in production (an OTP in the response defeats the point).
-  EXPOSE_OTP: z.enum(['true', 'false']).optional(),
+  // Empty string (from docker-compose ${VAR:-}) is treated as unset.
+  EXPOSE_OTP: z.preprocess((v) => (v === '' ? undefined : v), z.enum(['true', 'false']).optional()),
+
+  // SMTP for sending real OTP emails (leave unset to log the OTP instead).
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z.coerce.number().int().positive().default(587),
+  SMTP_SECURE: z.preprocess((v) => (v === '' ? undefined : v), z.enum(['true', 'false']).optional()), // true for port 465
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+  SMTP_FROM: z.string().optional(), // e.g. "Ghanipur <no-reply@yourdomain.com>"
 
   // Where uploaded product images are served from (absolute URLs stored in DB).
   UPLOAD_DIR: z.string().default('uploads'),

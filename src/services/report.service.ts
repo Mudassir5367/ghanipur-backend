@@ -129,18 +129,35 @@ async function wastageTotal(shopId: string, range: DateRange): Promise<number> {
 }
 
 async function inventorySnapshot(shopId: string) {
-  const rows = await Product.aggregate<{ stockValueMinor: number; lowStock: number; tracked: number }>([
+  const rows = await Product.aggregate<{ stockValueMinor: number; stockSellValueMinor: number; lowStock: number; tracked: number }>([
     { $match: { shopId: oid(shopId), isDeleted: false, trackInventory: true } },
     {
       $group: {
         _id: null,
         stockValueMinor: { $sum: { $multiply: ['$currentStock', '$purchaseCostMinor'] } },
+        // Value of remaining stock at selling price — the "price" of what's on hand.
+        stockSellValueMinor: { $sum: { $multiply: ['$currentStock', '$sellingPriceMinor'] } },
         lowStock: { $sum: { $cond: [{ $lte: ['$currentStock', '$minStock'] }, 1, 0] } },
         tracked: { $sum: 1 },
       },
     },
   ]);
-  return rows[0] ?? { stockValueMinor: 0, lowStock: 0, tracked: 0 };
+  return rows[0] ?? { stockValueMinor: 0, stockSellValueMinor: 0, lowStock: 0, tracked: 0 };
+}
+
+/** Dues that arose from transactions dated within the range (today): sale dues + delivery dues. */
+async function outstandingInRange(shopId: string, range: DateRange): Promise<number> {
+  const [saleRows, deliveryRows] = await Promise.all([
+    Sale.aggregate<{ total: number }>([
+      { $match: { shopId: oid(shopId), status: SaleStatus.COMPLETED, soldAt: { $gte: range.start, $lte: range.end }, dueMinor: { $gt: 0 } } },
+      { $group: { _id: null, total: { $sum: '$dueMinor' } } },
+    ]),
+    Delivery.aggregate<{ total: number }>([
+      { $match: { shopId: oid(shopId), status: { $ne: DeliveryStatus.CANCELLED }, createdAt: { $gte: range.start, $lte: range.end }, remainingMinor: { $gt: 0 } } },
+      { $group: { _id: null, total: { $sum: '$remainingMinor' } } },
+    ]),
+  ]);
+  return (saleRows[0]?.total ?? 0) + (deliveryRows[0]?.total ?? 0);
 }
 
 /** Remaining stock across all tracked products, summed per unit (L, kg, pcs …). */
@@ -163,24 +180,32 @@ async function stockByUnit(shopId: string) {
 async function profitForRange(shopId: string, range?: DateRange) {
   const saleMatch: Record<string, unknown> = { 'sale.status': SaleStatus.COMPLETED };
   if (range) saleMatch['sale.soldAt'] = { $gte: range.start, $lte: range.end };
-  const rows = await SaleItem.aggregate<{ revenue: number; cost: number; units: number }>([
-    { $match: { shopId: oid(shopId) } },
-    { $lookup: { from: 'sales', localField: 'saleId', foreignField: '_id', as: 'sale' } },
-    { $unwind: '$sale' },
-    { $match: saleMatch },
-    { $lookup: { from: 'products', localField: 'productId', foreignField: '_id', as: 'product' } },
-    { $unwind: '$product' },
-    {
-      $group: {
-        _id: null,
-        revenue: { $sum: '$lineTotalMinor' },
-        cost: { $sum: { $multiply: ['$quantity', '$product.purchaseCostMinor'] } },
-        units: { $sum: 1 },
-      },
-    },
+  const deliveryMatch: Record<string, unknown> = { shopId: oid(shopId), status: { $ne: DeliveryStatus.CANCELLED } };
+  if (range) deliveryMatch.createdAt = { $gte: range.start, $lte: range.end };
+
+  const [saleRows, deliveryRows] = await Promise.all([
+    // Counter/credit sales.
+    SaleItem.aggregate<{ revenue: number; cost: number }>([
+      { $match: { shopId: oid(shopId) } },
+      { $lookup: { from: 'sales', localField: 'saleId', foreignField: '_id', as: 'sale' } },
+      { $unwind: '$sale' },
+      { $match: saleMatch },
+      { $lookup: { from: 'products', localField: 'productId', foreignField: '_id', as: 'product' } },
+      { $unwind: '$product' },
+      { $group: { _id: null, revenue: { $sum: '$lineTotalMinor' }, cost: { $sum: { $multiply: ['$quantity', '$product.purchaseCostMinor'] } } } },
+    ]),
+    // Deliveries (goods sold on delivery — profit is realized regardless of payment).
+    Delivery.aggregate<{ revenue: number; cost: number }>([
+      { $match: deliveryMatch },
+      { $unwind: '$lines' },
+      { $lookup: { from: 'products', localField: 'lines.productId', foreignField: '_id', as: 'product' } },
+      { $unwind: '$product' },
+      { $group: { _id: null, revenue: { $sum: '$lines.lineTotalMinor' }, cost: { $sum: { $multiply: ['$lines.quantity', '$product.purchaseCostMinor'] } } } },
+    ]),
   ]);
-  const revenueMinor = rows[0]?.revenue ?? 0;
-  const costMinor = rows[0]?.cost ?? 0;
+
+  const revenueMinor = (saleRows[0]?.revenue ?? 0) + (deliveryRows[0]?.revenue ?? 0);
+  const costMinor = (saleRows[0]?.cost ?? 0) + (deliveryRows[0]?.cost ?? 0);
   return { revenueMinor, costMinor, profitMinor: revenueMinor - costMinor };
 }
 
@@ -207,10 +232,11 @@ export async function profitLoss(ctx: TenantContext) {
 export async function dashboard(ctx: TenantContext, rangeKey?: string) {
   const tz = await shopTimezone(ctx.shopId);
   const range = namedRange(rangeKey, tz);
-  const [sales, payments, outstanding, products, inventory, deliveries, stockUnits] = await Promise.all([
+  const [sales, payments, outstanding, todayOutstanding, products, inventory, deliveries, stockUnits] = await Promise.all([
     salesTotals(ctx.shopId, range),
     paymentsTotal(ctx.shopId, range),
     outstandingTotal(ctx.shopId),
+    outstandingInRange(ctx.shopId, range), // dues arising today only
     productSales(ctx.shopId, range),
     inventorySnapshot(ctx.shopId),
     Delivery.countDocuments({ shopId: ctx.shopId, createdAt: { $gte: range.start, $lte: range.end } }),
@@ -222,11 +248,13 @@ export async function dashboard(ctx: TenantContext, rangeKey?: string) {
     sales,
     paymentsReceivedMinor: payments,
     outstandingMinor: outstanding,
+    todayOutstandingMinor: todayOutstanding, // today's dues only (not the all-time balance)
     qtySold,
     // Per-unit breakdown so a mixed catalogue (litres, kg, pieces) reads correctly.
     qtyByUnit: quantityByUnit(products),
     topProducts: products.slice(0, 5),
     stockValueMinor: inventory.stockValueMinor,
+    stockSellValueMinor: inventory.stockSellValueMinor, // remaining stock at selling price
     stockByUnit: stockUnits, // remaining stock per unit
     trackedProducts: inventory.tracked,
     lowStockCount: inventory.lowStock,

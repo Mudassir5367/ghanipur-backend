@@ -42,6 +42,13 @@ services:
       SUPER_ADMIN_SETUP_KEY: ${SUPER_ADMIN_SETUP_KEY:-}
       ADMIN_SETUP_KEY: ${ADMIN_SETUP_KEY:-}
       EXPOSE_OTP: ${EXPOSE_OTP:-}
+      # SMTP for real OTP emails (set these in .env to actually send email)
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
       UPLOAD_DIR: /app/uploads
     volumes:
       - uploads_data:/app/uploads
@@ -50,7 +57,9 @@ services:
 
   frontend:
     build:
-      context: ../frontend
+      # Frontend repo path (sibling clone). Override FRONTEND_CONTEXT in .env if the
+      # frontend was cloned under a different folder name (e.g. ../ghanipur-frontend).
+      context: ${FRONTEND_CONTEXT:-../frontend}
       args:
         # Same-origin: the browser hits the Next server, which proxies /api/v1 and
         # /uploads to the backend (keeps the auth cookie first-party).

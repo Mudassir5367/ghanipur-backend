@@ -15,6 +15,8 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
     status: req.query.status as string | undefined,
     type: req.query.type as string | undefined,
     hasDue: req.query.hasDue as string | undefined,
+    from: req.query.from as string | undefined,
+    to: req.query.to as string | undefined,
   });
   ok(res, data, 200, meta);
 });

@@ -7,7 +7,7 @@ import { ApiError } from '../../utils/ApiError.js';
 import { env } from '../../config/env.js';
 
 const normalize = (email: string) => email.toLowerCase().trim();
-const genOtp = () => String(crypto.randomInt(0, 1_000_000)).padStart(6, '0'); // 000000–999999
+const genOtp = () => String(crypto.randomInt(0, 10 ** env.OTP_LENGTH)).padStart(env.OTP_LENGTH, '0');
 const genResetToken = () => crypto.randomBytes(32).toString('hex');
 
 /**
@@ -42,8 +42,11 @@ export async function requestPasswordReset(emailRaw: string): Promise<{ devOtp?:
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
 
+  // Local/dev (EXPOSE_OTP=true): surface the code in the response and skip email.
+  // Live (EXPOSE_OTP unset/false): send the real email, never expose the code.
+  if (env.exposeOtp) return { devOtp: otp };
   await sendOtpEmail(email, otp);
-  return env.exposeOtp ? { devOtp: otp } : {};
+  return {};
 }
 
 /**

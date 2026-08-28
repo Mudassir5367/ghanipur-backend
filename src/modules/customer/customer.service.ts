@@ -64,13 +64,23 @@ export async function createCustomer(ctx: TenantContext, input: CreateCustomerIn
   });
 }
 
-export async function listCustomers(ctx: TenantContext, query: unknown, filters: { status?: string; type?: string; hasDue?: string }) {
+export async function listCustomers(ctx: TenantContext, query: unknown, filters: { status?: string; type?: string; hasDue?: string; from?: string; to?: string }) {
   const { page, limit, skip, sort, search } = parsePagination(query, 'name');
   const filter: Record<string, unknown> = repo.scoped(ctx, { isDeleted: false });
   if (filters.status) filter.status = filters.status;
   if (filters.type) filter.type = filters.type;
   if (filters.hasDue === 'true') filter.currentBalanceMinor = { $gt: 0 };
-  if (search) filter.$or = [{ name: { $regex: search, $options: 'i' } }, { phone: { $regex: search, $options: 'i' } }];
+
+  const and: Record<string, unknown>[] = [];
+  if (search) and.push({ $or: [{ name: { $regex: search, $options: 'i' } }, { phone: { $regex: search, $options: 'i' } }] });
+  // Date-wise: customers whose last sale, last payment, or creation date is in range.
+  if (filters.from || filters.to) {
+    const range: Record<string, Date> = {};
+    if (filters.from) range.$gte = new Date(filters.from);
+    if (filters.to) range.$lte = new Date(filters.to);
+    and.push({ $or: [{ lastSaleAt: range }, { lastPaymentAt: range }, { createdAt: range }] });
+  }
+  if (and.length) filter.$and = and;
 
   const [docs, total] = await Promise.all([
     Customer.find(filter).sort(sort).skip(skip).limit(limit),

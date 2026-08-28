@@ -13,8 +13,8 @@ export const createProductSchema = z.object({
   description: z.string().max(2000).optional(),
   images: z.array(z.string().url()).max(8).optional(),
   unitValue: z.number().positive().optional(),
-  sellingPrice: money,
-  purchaseCost: money.optional(),
+  sellingPrice: money, // required
+  purchaseCost: money, // required — needed for profit (selling − cost)
   taxRate: z.number().min(0).max(100).optional(),
   taxInclusive: z.boolean().optional(),
   minStock: z.number().min(0).optional(),

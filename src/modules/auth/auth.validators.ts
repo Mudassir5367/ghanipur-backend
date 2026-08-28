@@ -41,7 +41,7 @@ export const forgotPasswordSchema = z.object({
 
 export const verifyOtpSchema = z.object({
   email: z.string().trim().toLowerCase().email(),
-  otp: z.string().trim().regex(/^\d{6}$/, 'Enter the 6-digit code'),
+  otp: z.string().trim().regex(/^\d{4,8}$/, 'Enter the verification code'),
 });
 
 export const resetPasswordSchema = z.object({

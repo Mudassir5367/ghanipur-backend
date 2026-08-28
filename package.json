@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc -p tsconfig.json",
@@ -15,6 +17,7 @@
     "seed": "tsx src/scripts/seed.ts"
   },
   "dependencies": {
+    "@types/nodemailer": "^8.0.1",
     "argon2": "^0.41.1",
     "compression": "^1.7.5",
     "cookie-parser": "^1.4.7",
@@ -28,6 +31,7 @@
     "mongoose": "^8.9.5",
     "multer": "^1.4.5-lts.1",
     "nanoid": "^5.0.9",
+    "nodemailer": "^9.0.6",
     "pino": "^9.6.0",
     "pino-http": "^10.4.0",
     "zod": "^3.24.1"
