@@ -9,10 +9,11 @@ dist/
 uploads/
 *.log
 
-# secrets & env (never commit real secrets)
+# secrets & env (never commit real secrets) — ignore every .env* EXCEPT the templates
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!.env.*.example
 
 # tooling
 coverage/
