@@ -2,7 +2,7 @@ import { Payment } from '../../models/payment.model.js';
 import { Customer } from '../../models/customer.model.js';
 import { ShopSettings } from '../../models/shopSettings.model.js';
 import { ApiError } from '../../utils/ApiError.js';
-import { toMinor } from '../../utils/money.js';
+import { toMinor, formatPKR } from '../../utils/money.js';
 import { parsePagination } from '../../utils/pagination.js';
 import { buildPageMeta } from '../../utils/http.js';
 import { withTransaction } from '../../utils/withTransaction.js';
@@ -29,6 +29,15 @@ export async function recordPayment(ctx: TenantContext, input: CreatePaymentInpu
   if (!customer) throw ApiError.badRequest('Customer not found', 'CUSTOMER_NOT_FOUND');
   const method = await assertMethod(ctx, input.method);
   const amountMinor = toMinor(input.amount);
+
+  // A collection can never exceed what the customer owes (no negative/advance balance).
+  const outstandingMinor = Math.max(0, customer.currentBalanceMinor);
+  if (amountMinor > outstandingMinor) {
+    throw ApiError.badRequest(
+      `Payment of ${formatPKR(amountMinor)} exceeds the outstanding balance of ${formatPKR(outstandingMinor)}.`,
+      'PAYMENT_EXCEEDS_BALANCE',
+    );
+  }
 
   return withTransaction(async (session) => {
     const [payment] = await Payment.create(

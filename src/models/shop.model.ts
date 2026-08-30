@@ -12,7 +12,7 @@ const shopSchema = new Schema(
   {
     name: { type: String, required: true, trim: true },
     slug: { type: String, required: true, unique: true, lowercase: true, trim: true, index: true },
-    ownerId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    ownerId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
 
     logo: { type: String, default: null },
     banner: { type: String, default: null },
@@ -52,6 +52,10 @@ const shopSchema = new Schema(
 );
 
 shopSchema.index({ status: 1, isDeleted: 1 });
+// One shop per owner (admin): a hard DB guarantee for the "an admin can create only
+// one shop" rule, alongside the service check (createMyShop) and UI redirect. Partial
+// so a soft-deleted shop never permanently blocks the owner from creating a new one.
+shopSchema.index({ ownerId: 1 }, { unique: true, partialFilterExpression: { isDeleted: false }, name: 'ownerId_unique_active' });
 
 export type ShopDoc = InferSchemaType<typeof shopSchema> & { _id: Types.ObjectId };
 

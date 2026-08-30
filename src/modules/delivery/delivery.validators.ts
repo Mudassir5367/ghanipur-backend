@@ -8,7 +8,8 @@ export const createDeliverySchema = z
   .object({
     customerId: objectId.optional(),
     lines: z
-      .array(z.object({ productId: objectId, quantity: z.number().positive(), unitPrice: money.optional() }))
+      // Per line: unitPrice = selling price per unit, costPrice = cost price per unit.
+      .array(z.object({ productId: objectId, quantity: z.number().positive(), unitPrice: money.optional(), costPrice: money.optional() }))
       .min(1, 'At least one item is required'),
     discount: money.optional(),
     deliveryCharge: money.optional(),

@@ -92,19 +92,43 @@ async function outstandingTotal(shopId: string): Promise<number> {
   return (ledger[0]?.total ?? 0) + (deliveries[0]?.total ?? 0);
 }
 
-/** Product-wise sold quantity + revenue for a range (joins items to their sale
- *  and to their unit, so quantities can be reported per measurement unit). */
+/** Product-wise sold quantity + revenue for a range. Combines counter/credit
+ *  sales (SaleItem) with deliveries (goods leave on delivery too), merged per
+ *  product, so quantities can be reported per measurement unit. */
 async function productSales(shopId: string, range: DateRange) {
-  return SaleItem.aggregate<{ _id: Types.ObjectId; name: string; qty: number; revenueMinor: number; unit: string }>([
-    { $match: { shopId: oid(shopId) } },
-    { $lookup: { from: 'sales', localField: 'saleId', foreignField: '_id', as: 'sale' } },
-    { $unwind: '$sale' },
-    { $match: { 'sale.status': SaleStatus.COMPLETED, 'sale.soldAt': { $gte: range.start, $lte: range.end } } },
-    { $lookup: { from: 'units', localField: 'unitId', foreignField: '_id', as: 'unit' } },
-    { $unwind: { path: '$unit', preserveNullAndEmptyArrays: true } },
-    { $group: { _id: '$productId', name: { $first: '$name' }, qty: { $sum: '$quantity' }, revenueMinor: { $sum: '$lineTotalMinor' }, unit: { $first: '$unit.symbol' } } },
-    { $sort: { revenueMinor: -1 } },
+  type Row = { _id: Types.ObjectId; name: string; qty: number; revenueMinor: number; unit: string };
+  const [saleRows, deliveryRows] = await Promise.all([
+    SaleItem.aggregate<Row>([
+      { $match: { shopId: oid(shopId) } },
+      { $lookup: { from: 'sales', localField: 'saleId', foreignField: '_id', as: 'sale' } },
+      { $unwind: '$sale' },
+      { $match: { 'sale.status': SaleStatus.COMPLETED, 'sale.soldAt': { $gte: range.start, $lte: range.end } } },
+      { $lookup: { from: 'units', localField: 'unitId', foreignField: '_id', as: 'unit' } },
+      { $unwind: { path: '$unit', preserveNullAndEmptyArrays: true } },
+      { $group: { _id: '$productId', name: { $first: '$name' }, qty: { $sum: '$quantity' }, revenueMinor: { $sum: '$lineTotalMinor' }, unit: { $first: '$unit.symbol' } } },
+    ]),
+    // Delivered goods (same window/status the revenue & profit cards use).
+    Delivery.aggregate<Row>([
+      { $match: { shopId: oid(shopId), status: { $ne: DeliveryStatus.CANCELLED }, createdAt: { $gte: range.start, $lte: range.end } } },
+      { $unwind: '$lines' },
+      { $group: { _id: '$lines.productId', name: { $first: '$lines.name' }, qty: { $sum: '$lines.quantity' }, revenueMinor: { $sum: '$lines.lineTotalMinor' }, unit: { $first: '$lines.unitSymbol' } } },
+    ]),
   ]);
+
+  // Merge the two sources per product (a product can be both sold and delivered).
+  const byProduct = new Map<string, Row>();
+  for (const r of [...saleRows, ...deliveryRows]) {
+    const key = String(r._id);
+    const existing = byProduct.get(key);
+    if (existing) {
+      existing.qty += r.qty;
+      existing.revenueMinor += r.revenueMinor;
+      if (!existing.unit) existing.unit = r.unit;
+    } else {
+      byProduct.set(key, { _id: r._id, name: r.name, qty: r.qty, revenueMinor: r.revenueMinor, unit: r.unit });
+    }
+  }
+  return [...byProduct.values()].sort((a, b) => b.revenueMinor - a.revenueMinor);
 }
 
 /**
@@ -195,12 +219,10 @@ async function profitForRange(shopId: string, range?: DateRange) {
       { $group: { _id: null, revenue: { $sum: '$lineTotalMinor' }, cost: { $sum: { $multiply: ['$quantity', '$product.purchaseCostMinor'] } } } },
     ]),
     // Deliveries (goods sold on delivery — profit is realized regardless of payment).
+    // Per-delivery profit = Selling (subtotal) − Cost (costPriceMinor).
     Delivery.aggregate<{ revenue: number; cost: number }>([
       { $match: deliveryMatch },
-      { $unwind: '$lines' },
-      { $lookup: { from: 'products', localField: 'lines.productId', foreignField: '_id', as: 'product' } },
-      { $unwind: '$product' },
-      { $group: { _id: null, revenue: { $sum: '$lines.lineTotalMinor' }, cost: { $sum: { $multiply: ['$lines.quantity', '$product.purchaseCostMinor'] } } } },
+      { $group: { _id: null, revenue: { $sum: '$subtotalMinor' }, cost: { $sum: '$costPriceMinor' } } },
     ]),
   ]);
 

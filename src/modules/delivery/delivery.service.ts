@@ -18,6 +18,7 @@ interface PopulatedProduct {
   name: string;
   sku: string;
   sellingPriceMinor: number;
+  purchaseCostMinor: number;
   images: string[];
   isAvailable: boolean;
   categoryId?: { name?: string };
@@ -40,6 +41,8 @@ export async function createDelivery(ctx: TenantContext, input: CreateDeliveryIn
     const p = byId.get(l.productId);
     if (!p) throw ApiError.badRequest(`Product not found: ${l.productId}`, 'PRODUCT_NOT_FOUND');
     const unitPriceMinor = l.unitPrice !== undefined ? toMinor(l.unitPrice) : p.sellingPriceMinor;
+    // Per-delivery cost price; falls back to the product's cost when not overridden.
+    const costPriceMinor = l.costPrice !== undefined ? toMinor(l.costPrice) : (p.purchaseCostMinor ?? 0);
     const lineTotalMinor = Math.round(unitPriceMinor * l.quantity);
     return {
       productId: p._id,
@@ -51,11 +54,15 @@ export async function createDelivery(ctx: TenantContext, input: CreateDeliveryIn
       unitId: p.unitId?._id ?? null,
       unitSymbol: p.unitId?.symbol ?? '',
       unitPriceMinor,
+      costPriceMinor,
       lineTotalMinor,
     };
   });
 
+  // Per-line selling/cost drive the totals (like a walk-in sale). The delivery's total
+  // cost is stored so the dashboard profit card can show Selling − Cost per delivery.
   const subtotalMinor = lines.reduce((s, l) => s + l.lineTotalMinor, 0);
+  const costPriceMinor = lines.reduce((s, l) => s + Math.round(l.costPriceMinor * l.quantity), 0);
   const discountMinor = input.discount ? toMinor(input.discount) : 0;
   const deliveryChargeMinor = input.deliveryCharge ? toMinor(input.deliveryCharge) : 0;
   const grandTotalMinor = subtotalMinor + deliveryChargeMinor - discountMinor;
@@ -72,31 +79,56 @@ export async function createDelivery(ctx: TenantContext, input: CreateDeliveryIn
       ? [{ amountMinor: paidMinor, method: 'CASH', note: 'Initial payment', remainingAfterMinor: remainingMinor, receivedBy: userId, receivedAt: new Date() }]
       : [];
 
-  const delivery = await Delivery.create({
-    shopId: ctx.shopId,
-    code: generateCode('DEL'),
-    customerId: input.customerId ?? null,
-    customerName: customer?.name ?? '',
-    customerPhone: customer?.phone ?? '',
-    lines,
-    subtotalMinor,
-    discountMinor,
-    deliveryChargeMinor,
-    grandTotalMinor,
-    paidMinor,
-    remainingMinor,
-    paymentType: input.paymentType,
-    paymentStatus: derivePaymentStatus(grandTotalMinor, paidMinor),
-    payments,
-    status: DeliveryStatus.PENDING,
-    inventoryDeducted: false,
-    assignedToName: input.assignedToName ?? '',
-    address: input.address ?? customer?.address ?? '',
-    note: input.note ?? '',
-    scheduledFor: input.scheduledFor ? new Date(input.scheduledFor) : null,
-    createdBy: userId,
+  // A recorded delivery is a committed sale: create it and deduct stock atomically,
+  // so remaining stock drops immediately (the reports already count it as a sale).
+  // Stock is marked deducted here, so a later CONFIRMED transition won't re-deduct
+  // and a CANCELLED transition restores it (see changeStatus). Insufficient stock
+  // rolls the whole thing back — no delivery and no stock change.
+  return withTransaction(async (session) => {
+    const created = await Delivery.create(
+      [{
+        shopId: ctx.shopId,
+        code: generateCode('DEL'),
+        customerId: input.customerId ?? null,
+        customerName: customer?.name ?? '',
+        customerPhone: customer?.phone ?? '',
+        lines,
+        subtotalMinor,
+        costPriceMinor,
+        discountMinor,
+        deliveryChargeMinor,
+        grandTotalMinor,
+        paidMinor,
+        remainingMinor,
+        paymentType: input.paymentType,
+        paymentStatus: derivePaymentStatus(grandTotalMinor, paidMinor),
+        payments,
+        status: DeliveryStatus.PENDING,
+        inventoryDeducted: true,
+        assignedToName: input.assignedToName ?? '',
+        address: input.address ?? customer?.address ?? '',
+        note: input.note ?? '',
+        scheduledFor: input.scheduledFor ? new Date(input.scheduledFor) : null,
+        createdBy: userId,
+      }],
+      { session },
+    );
+    const delivery = created[0]!;
+
+    for (const line of delivery.lines) {
+      const result = await recordMovement(
+        ctx,
+        { productId: line.productId.toString(), type: InventoryTxnType.DELIVERY, quantity: line.quantity, refType: RefType.DELIVERY, refId: delivery._id, performedBy: userId, note: `Delivery ${delivery.code}` },
+        session,
+      );
+      if (!result.skipped && result.balanceAfter !== undefined) {
+        line.stockAfter = result.balanceAfter;
+        line.stockBefore = result.balanceAfter + line.quantity;
+      }
+    }
+    await delivery.save({ session });
+    return delivery;
   });
-  return delivery;
 }
 
 export async function listDeliveries(ctx: TenantContext, query: unknown, filters: { status?: string; paymentStatus?: string; customerId?: string; from?: string; to?: string }) {

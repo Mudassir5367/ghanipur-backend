@@ -26,7 +26,8 @@ const deliveryLineSchema = new Schema(
     quantity: { type: Number, required: true },
     unitId: { type: Schema.Types.ObjectId, ref: 'Unit', default: null },
     unitSymbol: { type: String, default: '' },
-    unitPriceMinor: { type: Number, required: true },
+    unitPriceMinor: { type: Number, required: true }, // selling price per unit (snapshot)
+    costPriceMinor: { type: Number, default: 0 },      // cost price per unit (snapshot) — per-delivery profit
     lineTotalMinor: { type: Number, required: true },
     // Inventory snapshot captured at confirmation (§4).
     stockBefore: { type: Number, default: null },
@@ -65,6 +66,8 @@ const deliverySchema = new Schema(
     discountMinor: { type: Number, default: 0 },
     deliveryChargeMinor: { type: Number, default: 0 },
     grandTotalMinor: { type: Number, required: true, default: 0 },
+    // Total cost of goods for this delivery — Selling (subtotal) − Cost = delivery profit.
+    costPriceMinor: { type: Number, default: 0 },
     paidMinor: { type: Number, default: 0 },
     remainingMinor: { type: Number, default: 0 },
     paymentType: { type: String, enum: Object.values(PaymentType), default: PaymentType.CREDIT },
