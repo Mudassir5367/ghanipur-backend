@@ -2,6 +2,8 @@ import { Types } from 'mongoose';
 import { Delivery, DeliveryStatus, PaymentType, DELIVERY_TRANSITIONS, derivePaymentStatus } from '../../models/delivery.model.js';
 import { Product } from '../../models/product.model.js';
 import { Customer } from '../../models/customer.model.js';
+import { Shop } from '../../models/shop.model.js';
+import { dayRange } from '../../utils/dateRange.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { toMinor } from '../../utils/money.js';
 import { generateCode } from '../../utils/code.js';
@@ -103,8 +105,11 @@ export async function createDelivery(ctx: TenantContext, input: CreateDeliveryIn
         paymentType: input.paymentType,
         paymentStatus: derivePaymentStatus(grandTotalMinor, paidMinor),
         payments,
-        status: DeliveryStatus.PENDING,
+        // The roster "one-click deliver" flow saves straight as DELIVERED; otherwise PENDING.
+        status: input.deliverNow ? DeliveryStatus.DELIVERED : DeliveryStatus.PENDING,
         inventoryDeducted: true,
+        confirmedAt: input.deliverNow ? new Date() : null,
+        deliveredAt: input.deliverNow ? new Date() : null,
         assignedToName: input.assignedToName ?? '',
         address: input.address ?? customer?.address ?? '',
         note: input.note ?? '',
@@ -129,6 +134,141 @@ export async function createDelivery(ctx: TenantContext, input: CreateDeliveryIn
     await delivery.save({ session });
     return delivery;
   });
+}
+
+/**
+ * Edit an existing delivery (admin). Rebuilds the lines/totals from the input and
+ * reconciles stock: restore the previously-deducted quantities, then deduct the new
+ * ones (guarded, so insufficient stock rolls the whole edit back).
+ */
+export async function updateDelivery(ctx: TenantContext, id: string, input: CreateDeliveryInput, userId: string) {
+  let customer = null;
+  if (input.customerId) {
+    customer = await Customer.findOne({ _id: input.customerId, shopId: ctx.shopId, isDeleted: false });
+    if (!customer) throw ApiError.badRequest('Customer not found', 'CUSTOMER_NOT_FOUND');
+  }
+
+  const products = (await Product.find({ _id: { $in: input.lines.map((l) => l.productId) }, shopId: ctx.shopId, isDeleted: false })
+    .populate('categoryId', 'name')
+    .populate('unitId', 'symbol')) as unknown as PopulatedProduct[];
+  const byId = new Map(products.map((p) => [p._id.toString(), p]));
+
+  const lines = input.lines.map((l) => {
+    const p = byId.get(l.productId);
+    if (!p) throw ApiError.badRequest(`Product not found: ${l.productId}`, 'PRODUCT_NOT_FOUND');
+    const unitPriceMinor = l.unitPrice !== undefined ? toMinor(l.unitPrice) : p.sellingPriceMinor;
+    const costPriceMinor = l.costPrice !== undefined ? toMinor(l.costPrice) : (p.purchaseCostMinor ?? 0);
+    const lineTotalMinor = Math.round(unitPriceMinor * l.quantity);
+    return {
+      productId: p._id, name: p.name, sku: p.sku, category: p.categoryId?.name ?? '', imageUrl: p.images?.[0] ?? null,
+      quantity: l.quantity, unitId: p.unitId?._id ?? null, unitSymbol: p.unitId?.symbol ?? '',
+      unitPriceMinor, costPriceMinor, lineTotalMinor, stockBefore: null as number | null, stockAfter: null as number | null,
+    };
+  });
+
+  const subtotalMinor = lines.reduce((s, l) => s + l.lineTotalMinor, 0);
+  const costTotalMinor = lines.reduce((s, l) => s + Math.round(l.costPriceMinor * l.quantity), 0);
+  const discountMinor = input.discount ? toMinor(input.discount) : 0;
+  const deliveryChargeMinor = input.deliveryCharge ? toMinor(input.deliveryCharge) : 0;
+  const grandTotalMinor = subtotalMinor + deliveryChargeMinor - discountMinor;
+  if (grandTotalMinor < 0) throw ApiError.badRequest('Discount cannot exceed the total', 'INVALID_DISCOUNT');
+  let paidMinor = input.paymentType === PaymentType.CASH ? grandTotalMinor : input.paidAmount ? toMinor(input.paidAmount) : 0;
+  if (paidMinor > grandTotalMinor) throw ApiError.badRequest('Paid amount cannot exceed the grand total', 'OVERPAYMENT');
+  if (paidMinor < 0) paidMinor = 0;
+  const remainingMinor = grandTotalMinor - paidMinor;
+  const payments = paidMinor > 0
+    ? [{ amountMinor: paidMinor, method: 'CASH', note: 'Payment (edited)', remainingAfterMinor: remainingMinor, receivedBy: userId, receivedAt: new Date() }]
+    : [];
+
+  return withTransaction(async (session) => {
+    const delivery = await Delivery.findOne({ _id: id, shopId: ctx.shopId }).session(session ?? null);
+    if (!delivery) throw ApiError.notFound('Delivery not found', 'DELIVERY_NOT_FOUND');
+    if (delivery.status === DeliveryStatus.CANCELLED) throw ApiError.badRequest('Cannot edit a cancelled delivery', 'DELIVERY_CANCELLED');
+
+    // Give back the old stock, then take the new — net change is applied atomically.
+    if (delivery.inventoryDeducted) {
+      for (const line of delivery.lines) {
+        await recordMovement(ctx, { productId: line.productId.toString(), type: InventoryTxnType.RETURN, quantity: line.quantity, refType: RefType.DELIVERY, refId: delivery._id, performedBy: userId, note: `Edit ${delivery.code}` }, session);
+      }
+    }
+    for (const line of lines) {
+      const result = await recordMovement(ctx, { productId: line.productId.toString(), type: InventoryTxnType.DELIVERY, quantity: line.quantity, refType: RefType.DELIVERY, refId: delivery._id, performedBy: userId, note: `Delivery ${delivery.code}` }, session);
+      if (!result.skipped && result.balanceAfter !== undefined) { line.stockAfter = result.balanceAfter; line.stockBefore = result.balanceAfter + line.quantity; }
+    }
+
+    delivery.customerId = (input.customerId ?? null) as unknown as Types.ObjectId;
+    delivery.customerName = customer?.name ?? '';
+    delivery.customerPhone = customer?.phone ?? '';
+    delivery.set('lines', lines);
+    delivery.subtotalMinor = subtotalMinor;
+    delivery.costPriceMinor = costTotalMinor;
+    delivery.discountMinor = discountMinor;
+    delivery.deliveryChargeMinor = deliveryChargeMinor;
+    delivery.grandTotalMinor = grandTotalMinor;
+    delivery.paidMinor = paidMinor;
+    delivery.remainingMinor = remainingMinor;
+    delivery.paymentType = input.paymentType;
+    delivery.paymentStatus = derivePaymentStatus(grandTotalMinor, paidMinor);
+    delivery.set('payments', payments);
+    delivery.inventoryDeducted = true;
+    if (input.deliverNow && delivery.status !== DeliveryStatus.DELIVERED) {
+      delivery.status = DeliveryStatus.DELIVERED;
+      delivery.deliveredAt = new Date();
+      if (!delivery.confirmedAt) delivery.confirmedAt = new Date();
+    }
+    if (input.assignedToName !== undefined) delivery.assignedToName = input.assignedToName;
+    if (input.address !== undefined) delivery.address = input.address;
+    if (input.note !== undefined) delivery.note = input.note;
+    await delivery.save({ session });
+    return delivery;
+  });
+}
+
+/**
+ * Daily delivery roster: every active customer with today's status — DELIVERED if a
+ * (non-cancelled) delivery was made for them today, else PENDING. Rolls over at
+ * midnight (shop timezone) since "today" moves, and new customers appear automatically.
+ */
+export async function deliveryRoster(ctx: TenantContext) {
+  const shop = await Shop.findById(ctx.shopId, 'timezone');
+  const range = dayRange(undefined, shop?.timezone ?? 'Asia/Karachi');
+  const customers = await Customer.find({ shopId: ctx.shopId, isDeleted: false }).select('name phone address currentBalanceMinor').sort({ name: 1 }).lean();
+  const ids = customers.map((c) => String(c._id));
+  const [todays, deliveryDues] = await Promise.all([
+    Delivery.find({ shopId: ctx.shopId, status: { $ne: DeliveryStatus.CANCELLED }, createdAt: { $gte: range.start, $lte: range.end } })
+      .select('customerId code grandTotalMinor remainingMinor createdAt').sort({ createdAt: -1 }).lean(),
+    // Same total-dues source the Customers page uses, so the numbers reconcile.
+    outstandingByCustomers(ctx, ids),
+  ]);
+
+  // Per customer: the latest today's delivery (for Edit) plus the sum of today's deliveries.
+  const today = new Map<string, { latestId: string; latestCode: string; totalMinor: number }>();
+  for (const d of todays) {
+    if (!d.customerId) continue;
+    const key = String(d.customerId);
+    const cur = today.get(key);
+    if (!cur) today.set(key, { latestId: String(d._id), latestCode: d.code, totalMinor: d.grandTotalMinor }); // sorted desc → first is latest
+    else cur.totalMinor += d.grandTotalMinor;
+  }
+
+  const rows = customers.map((c) => {
+    const key = String(c._id);
+    const t = today.get(key);
+    // Total owed = ledger balance + all delivery dues (matches the Customers page).
+    const outstandingMinor = Math.max(0, c.currentBalanceMinor ?? 0) + (deliveryDues.get(key) ?? 0);
+    return {
+      customerId: key,
+      name: c.name,
+      phone: c.phone ?? '',
+      address: c.address ?? '',
+      outstandingMinor,
+      status: t ? 'DELIVERED' : 'PENDING',
+      deliveryId: t?.latestId ?? null,
+      deliveryCode: t?.latestCode ?? null,
+      todayTotalMinor: t?.totalMinor ?? 0,
+    };
+  });
+  return { date: range.start, rows };
 }
 
 export async function listDeliveries(ctx: TenantContext, query: unknown, filters: { status?: string; paymentStatus?: string; customerId?: string; from?: string; to?: string }) {

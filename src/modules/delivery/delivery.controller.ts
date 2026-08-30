@@ -33,6 +33,17 @@ export const create = asyncHandler(async (req: Request, res: Response) => {
   created(res, { delivery });
 });
 
+export const roster = asyncHandler(async (req: Request, res: Response) => {
+  const data = await service.deliveryRoster(ctx(req));
+  ok(res, data);
+});
+
+export const update = asyncHandler(async (req: Request, res: Response) => {
+  const delivery = await service.updateDelivery(ctx(req), req.params.id!, req.body, req.auth!.userId);
+  await recordAudit({ actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: ctx(req).shopId, action: 'DELIVERY_UPDATE', resource: 'Delivery', resourceId: req.params.id, ip: req.ip });
+  ok(res, { delivery });
+});
+
 export const setStatus = asyncHandler(async (req: Request, res: Response) => {
   const status = req.body.status as DeliveryStatus;
   const delivery = await service.changeStatus(ctx(req), req.params.id!, status, req.auth!.userId);

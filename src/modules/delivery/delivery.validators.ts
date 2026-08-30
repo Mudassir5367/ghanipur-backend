@@ -15,6 +15,7 @@ export const createDeliverySchema = z
     deliveryCharge: money.optional(),
     paymentType: z.nativeEnum(PaymentType).default(PaymentType.CREDIT),
     paidAmount: money.optional(), // initial payment (ignored for CASH — auto full)
+    deliverNow: z.boolean().optional(), // roster one-click: save straight as DELIVERED
     assignedToName: z.string().trim().max(80).optional(),
     address: z.string().max(300).optional(),
     note: z.string().max(500).optional(),
