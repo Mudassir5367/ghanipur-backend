@@ -1,10 +1,12 @@
 import { createApp } from './app.js';
 import { connectDatabase, disconnectDatabase } from './config/db.js';
+import { pingDatabase as pingDynamo } from './config/dynamo.js';
 import { env } from './config/env.js';
 import { logger } from './config/logger.js';
 
 async function bootstrap(): Promise<void> {
   await connectDatabase();
+  await pingDynamo();
   const app = createApp();
 
   const server = app.listen(env.PORT, () => {

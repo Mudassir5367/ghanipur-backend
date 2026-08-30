@@ -9,7 +9,17 @@ const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(5000),
 
+  // Transitional: still required while Mongoose modules are being ported to
+  // DynamoDB (§ migration plan). Removed once the port is complete.
   MONGO_URI: z.string().min(1, 'MONGO_URI is required'),
+
+  // DynamoDB. No AWS_ACCESS_KEY_ID/SECRET in production — the EC2 instance role
+  // is used instead (SDK default credential chain resolves it automatically).
+  AWS_REGION: z.string().min(1).default('ap-south-1'),
+  AWS_ACCESS_KEY_ID: z.string().optional(),
+  AWS_SECRET_ACCESS_KEY: z.string().optional(),
+  DYNAMO_ENDPOINT: z.string().url().optional(), // local dynamodb-local override
+  DYNAMO_TABLE_PREFIX: z.string().default(''),  // e.g. "ghanipur_" for env isolation
 
   JWT_ACCESS_SECRET: z.string().min(16, 'JWT_ACCESS_SECRET must be >=16 chars'),
   JWT_REFRESH_SECRET: z.string().min(16, 'JWT_REFRESH_SECRET must be >=16 chars'),
