@@ -29,27 +29,36 @@ Boot **fails fast** if required vars are missing or malformed.
 
 ## Topology
 
-Backend and frontend are **separate repos and separate compose stacks**, joined
-by the shared external Docker network `ghanipur-net`:
+Backend and frontend are **separate repos on separate machines**. A Docker
+network cannot span hosts, so the frontend reaches this API by address
+(`BACKEND_ORIGIN` in its `.env`):
 
 ```
-internet ──▶ :3000 frontend (Next)
-                     │  rewrites /api/v1 + /uploads
-                     ▼  (over ghanipur-net)
-                  backend:5000 ──▶ mongo:27017
-                  (127.0.0.1 only)   (not published)
+   FRONTEND MACHINE                      BACKEND MACHINE
+internet ──▶ :3000 Next  ──────────────▶  :5000 API ──▶ mongo:27017
+             proxies /api/v1              (SG-restricted)  (not published)
+                     /uploads
 ```
 
-Only port 3000 is ever exposed publicly. That keeps the refresh cookie
-first-party (browser only ever talks to one origin, so no CORS and no
-`SameSite=None` needed) and keeps Mongo — which runs **without authentication** —
-off every public interface. Do not add a `27017:27017` port mapping: on EC2 with
-an open security group that is an unauthenticated public database.
+Only the frontend's :3000 is open to the world. The browser never contacts the
+API directly, so the refresh cookie stays first-party — no CORS, no
+`SameSite=None`.
+
+Two things carry the security here, since the API is no longer behind a
+loopback bind:
+
+- **Security group.** Inbound 5000 must be restricted to the frontend instance
+  (its security group, or its IP `/32`). Open to `0.0.0.0/0` it is a public API.
+- **Mongo stays unpublished.** It runs *without authentication* and is reachable
+  only from the backend container over the private compose network. Never add a
+  `27017:27017` mapping — on EC2 that is an unauthenticated public database.
+
+Prefer **private IPs** when both instances share a VPC: cross-machine API
+traffic then stays inside AWS. Over public IPs it crosses the internet in
+plaintext, bearer tokens included — put TLS in front of the API if you must do
+that.
 
 ## Self-hosted (Docker Compose)
-```bash
-docker network create ghanipur-net     # once per machine, before either stack
-```
 
 Backend stack:
 ```bash
@@ -57,8 +66,8 @@ cp .env.production.example .env        # set APP_URL/API_URL/CORS_ORIGINS + secr
 docker compose up -d --build
 ```
 - Mongo starts as single-node replica set `rs0` (healthcheck initiates it).
-- Backend waits for Mongo health, then serves on :5000 (loopback + `ghanipur-net`).
-- Frontend is deployed from its own repo — see its README.
+- Backend waits for Mongo health, then serves on :5000.
+- Frontend is deployed from its own repo, on its own machine — see its README.
 - Seed dev data: `docker compose exec backend node dist/scripts/seed.js`.
 
 ### DynamoDB
