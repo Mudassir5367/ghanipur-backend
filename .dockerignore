@@ -1,10 +1,22 @@
+# Reinstalled/rebuilt inside the image
 node_modules
 dist
-tests
-uploads
-coverage
+
+# Secrets — note plain `.env` is NOT matched by `.env.*`, so list it too.
 .env
 .env.*
 !.env.example
-*.log
+!.env.*.example
+
+# Not needed in the build context
 .git
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
+tests
+uploads
+coverage
+docs
+run.ps1
+*.log

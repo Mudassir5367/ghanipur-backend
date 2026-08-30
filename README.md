@@ -51,15 +51,24 @@ Seeded logins (dev only):
 
 ## Quick start (Docker Compose)
 
+The backend and frontend are separate repos and separate compose stacks. This
+stack runs **Mongo + the API**; the frontend has its own `docker-compose.yml` in
+the `ghanipur-frontend` repo. They meet on the shared external Docker network
+`ghanipur-net`, which is how the Next server resolves this API as `backend:5000`.
+
 ```bash
-# from repo root
-export JWT_ACCESS_SECRET=$(openssl rand -hex 24)
-export JWT_REFRESH_SECRET=$(openssl rand -hex 24)
-docker compose up --build
+docker network create ghanipur-net     # once per machine
+cp .env.production.example .env        # fill in the secrets
+docker compose up -d --build
 ```
 
 Mongo runs as a single-node replica set (`rs0`) so transactions work. The backend
 waits for Mongo's healthcheck, which also initiates the replica set.
+
+Nothing in this stack is published to the internet: the API binds to `127.0.0.1`
+for on-box debugging, and **Mongo runs without authentication**, so its port is
+deliberately not published at all. Browser traffic arrives at the frontend on
+`:3000` and is proxied inward. Full procedure in [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 ## Scripts
 | Location | Command | Purpose |

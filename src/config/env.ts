@@ -20,6 +20,11 @@ const schema = z.object({
   AWS_SECRET_ACCESS_KEY: z.string().optional(),
   DYNAMO_ENDPOINT: z.string().url().optional(), // local dynamodb-local override
   DYNAMO_TABLE_PREFIX: z.string().default(''),  // e.g. "ghanipur_" for env isolation
+  // Nothing reads DynamoDB yet — the Mongo -> Dynamo port is unfinished, so every
+  // module still goes through Mongoose. An unreachable table therefore must not
+  // stop the server booting. Set 'true' once the port lands and the tables are
+  // genuinely required, to get the fail-fast behaviour back.
+  DYNAMO_REQUIRED: z.preprocess((v) => (v === '' ? undefined : v), z.enum(['true', 'false']).optional()),
 
   JWT_ACCESS_SECRET: z.string().min(16, 'JWT_ACCESS_SECRET must be >=16 chars'),
   JWT_REFRESH_SECRET: z.string().min(16, 'JWT_REFRESH_SECRET must be >=16 chars'),
@@ -97,6 +102,7 @@ export const env = {
   isDev: raw.NODE_ENV === 'development',
   cookieSecure,
   exposeOtp: raw.EXPOSE_OTP === 'true',
+  dynamoRequired: raw.DYNAMO_REQUIRED === 'true',
   corsOrigins: raw.CORS_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean),
 } as const;
 

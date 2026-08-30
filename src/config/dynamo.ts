@@ -18,9 +18,24 @@ export const ddb = DynamoDBDocumentClient.from(ddbClient, {
   marshallOptions: { removeUndefinedValues: true },
 });
 
-/** Fail fast at boot if credentials/region/tables are misconfigured. */
+/**
+ * Boot check for credentials/region/tables. Only FATAL when DYNAMO_REQUIRED=true.
+ *
+ * No module reads DynamoDB yet (every repository still goes through Mongoose),
+ * so a missing table or absent instance role must not crash-loop the container
+ * on a deployment that runs perfectly well on Mongo alone. Turn the flag on once
+ * the port is complete and the tables actually back live reads.
+ */
 export async function pingDatabase(): Promise<void> {
   const anyTable = Object.values(TABLES)[0];
-  await ddbClient.send(new DescribeTableCommand({ TableName: anyTable }));
-  logger.info('DynamoDB reachable');
+  try {
+    await ddbClient.send(new DescribeTableCommand({ TableName: anyTable }));
+    logger.info('DynamoDB reachable');
+  } catch (err) {
+    if (env.dynamoRequired) throw err;
+    logger.warn(
+      { err, table: anyTable },
+      'DynamoDB unreachable — continuing, since no module reads it yet. Set DYNAMO_REQUIRED=true to make this fatal.',
+    );
+  }
 }

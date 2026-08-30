@@ -27,16 +27,46 @@ Boot **fails fast** if required vars are missing or malformed.
 ### Frontend (build-time)
 `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_APP_URL` — baked into the client bundle at build.
 
-## Local / self-hosted (Docker Compose)
+## Topology
+
+Backend and frontend are **separate repos and separate compose stacks**, joined
+by the shared external Docker network `ghanipur-net`:
+
+```
+internet ──▶ :3000 frontend (Next)
+                     │  rewrites /api/v1 + /uploads
+                     ▼  (over ghanipur-net)
+                  backend:5000 ──▶ mongo:27017
+                  (127.0.0.1 only)   (not published)
+```
+
+Only port 3000 is ever exposed publicly. That keeps the refresh cookie
+first-party (browser only ever talks to one origin, so no CORS and no
+`SameSite=None` needed) and keeps Mongo — which runs **without authentication** —
+off every public interface. Do not add a `27017:27017` port mapping: on EC2 with
+an open security group that is an unauthenticated public database.
+
+## Self-hosted (Docker Compose)
 ```bash
-export JWT_ACCESS_SECRET=$(openssl rand -hex 32)
-export JWT_REFRESH_SECRET=$(openssl rand -hex 32)
-docker compose up --build
+docker network create ghanipur-net     # once per machine, before either stack
+```
+
+Backend stack:
+```bash
+cp .env.production.example .env        # set APP_URL/API_URL/CORS_ORIGINS + secrets
+docker compose up -d --build
 ```
 - Mongo starts as single-node replica set `rs0` (healthcheck initiates it).
-- Backend waits for Mongo health, then serves on :5000.
-- Frontend serves on :3000.
-- Seed dev data: `docker compose exec backend node dist/scripts/... ` or run `npm run seed` against the Mongo URI.
+- Backend waits for Mongo health, then serves on :5000 (loopback + `ghanipur-net`).
+- Frontend is deployed from its own repo — see its README.
+- Seed dev data: `docker compose exec backend node dist/scripts/seed.js`.
+
+### DynamoDB
+`server.ts` pings DynamoDB at boot, but no module reads it yet — every repository
+still goes through Mongoose. `DYNAMO_REQUIRED=false` (the default) makes an
+unreachable table a warning instead of a fatal boot error, so the stack runs on
+Mongo alone. Set it to `true` once the port is complete and the tables are
+provisioned (`./provision-dynamodb.sh`, run from AWS CloudShell).
 
 ## Production notes
 - **Cookies**: in production the refresh cookie is `Secure` + `SameSite=None`; serve over HTTPS and set `COOKIE_DOMAIN`. Put the API behind TLS (reverse proxy / load balancer).
