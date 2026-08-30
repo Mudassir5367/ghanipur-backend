@@ -34,6 +34,14 @@ services:
       NODE_ENV: production
       PORT: 5000
       MONGO_URI: mongodb://mongo:27017/ghanipur?replicaSet=rs0
+      # DynamoDB (transitional, alongside Mongo until the port is complete —
+      # see the migration plan). No AWS_ACCESS_KEY_ID/SECRET on EC2: the
+      # instance role is used there; set them in .env only for local Docker.
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      DYNAMO_ENDPOINT: ${DYNAMO_ENDPOINT:-}
+      DYNAMO_TABLE_PREFIX: ${DYNAMO_TABLE_PREFIX:-}
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:-change-me-access-secret-min-16-chars}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-change-me-refresh-secret-min-16-chars}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
