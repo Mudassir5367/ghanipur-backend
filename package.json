@@ -15,7 +15,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "seed": "tsx src/scripts/seed.ts",
-    "provision:dynamo": "tsx src/scripts/generateProvisionScript.ts"
+    "provision:dynamo": "tsx src/scripts/generateProvisionScript.ts",
+    "check:dynamo": "tsx src/scripts/checkDynamoTables.ts",
+    "provision:dynamo:apply": "tsx src/scripts/provisionDynamoTables.ts"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1121.0",
