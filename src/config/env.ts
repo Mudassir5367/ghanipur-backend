@@ -56,7 +56,13 @@ const schema = z.object({
   // Empty string (from docker-compose ${VAR:-}) is treated as unset.
   EXPOSE_OTP: z.preprocess((v) => (v === '' ? undefined : v), z.enum(['true', 'false']).optional()),
 
-  // SMTP for sending real OTP emails (leave unset to log the OTP instead).
+  // Amazon SES — the preferred transport. Setting SES_FROM (a verified sender
+  // identity) switches mail to the SES API using the instance role, so no mail
+  // credentials live in the environment. Takes precedence over SMTP below.
+  SES_FROM: z.string().optional(), // e.g. "Ghanipur <no-reply@ghanipur.pk>"
+  SES_REGION: z.string().optional(), // defaults to AWS_REGION
+
+  // SMTP fallback for any non-SES provider (leave unset to log the OTP instead).
   SMTP_HOST: z.string().optional(),
   SMTP_PORT: z.coerce.number().int().positive().default(587),
   SMTP_SECURE: z.preprocess((v) => (v === '' ? undefined : v), z.enum(['true', 'false']).optional()), // true for port 465
