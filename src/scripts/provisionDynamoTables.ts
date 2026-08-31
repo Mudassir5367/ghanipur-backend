@@ -93,8 +93,14 @@ async function addMissingGsis(name: string, def: TableDef): Promise<string[]> {
   return added;
 }
 
-/** No SDK waiter exists for index status, so poll DescribeTable. */
-async function waitForIndexActive(table: string, index: string, timeoutMs = 300_000): Promise<void> {
+/**
+ * No SDK waiter exists for index status, so poll DescribeTable.
+ *
+ * The generous timeout is deliberate: a GSI is backfilled in the background and
+ * even an almost-empty table took ~3.5 minutes in practice, so a tighter bound
+ * fails the run while AWS is still working perfectly normally.
+ */
+async function waitForIndexActive(table: string, index: string, timeoutMs = 900_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const res = await ddbClient.send(new DescribeTableCommand({ TableName: table }));
