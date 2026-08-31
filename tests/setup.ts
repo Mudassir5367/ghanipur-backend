@@ -53,6 +53,10 @@ afterEach(async () => {
     // Only the tables the port has reached so far; extend as modules migrate.
     purgeTableForTests(TABLES.User as string, ['id', 'sk']),
     purgeTableForTests(TABLES.UserEmailGuard as string, ['email', 'sk']),
+    purgeTableForTests(TABLES.Shop as string, ['id', 'sk']),
+    purgeTableForTests(TABLES.ShopSlugGuard as string, ['slug', 'sk']),
+    purgeTableForTests(TABLES.ShopOwnerGuard as string, ['ownerId', 'sk']),
+    purgeTableForTests(TABLES.ShopSettings as string, ['shopId', 'sk']),
   ]);
 });
 

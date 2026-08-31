@@ -6,7 +6,7 @@ import { Customer } from '../models/customer.model.js';
 import { Product } from '../models/product.model.js';
 import { Delivery, DeliveryStatus } from '../models/delivery.model.js';
 import { InventoryTransaction } from '../models/inventoryTransaction.model.js';
-import { Shop } from '../models/shop.model.js';
+import * as shopRepo from '../repositories/dynamo/shopRepository.js';
 import { SaleType, SaleStatus } from '../constants/sales.js';
 import { InventoryTxnType } from '../constants/inventory.js';
 import { dayRange, monthRange, namedRange, type DateRange } from '../utils/dateRange.js';
@@ -15,7 +15,7 @@ import type { TenantContext } from '../types/context.js';
 const oid = (id: string) => new Types.ObjectId(id);
 
 async function shopTimezone(shopId: string): Promise<string> {
-  const shop = await Shop.findById(shopId, 'timezone');
+  const shop = await shopRepo.findById(shopId);
   return shop?.timezone ?? 'Asia/Karachi';
 }
 
@@ -385,19 +385,21 @@ export async function dailyMilk(ctx: TenantContext, dateStr?: string) {
 
 /** Platform-wide overview for the super admin (§29). */
 export async function platformOverview() {
-  const [shops, revenueAgg, salesCount] = await Promise.all([
-    Shop.aggregate<{ _id: string; count: number }>([
-      { $match: { isDeleted: false } },
-      { $group: { _id: '$status', count: { $sum: 1 } } },
-    ]),
+  const [liveShops, revenueAgg, salesCount] = await Promise.all([
+    // DynamoDB has no aggregation pipeline; shops are low-cardinality (one row
+    // per business), so the counts are tallied from the byStatus index reads.
+    shopRepo.listAllActive(),
     Sale.aggregate<{ total: number }>([
       { $match: { status: SaleStatus.COMPLETED } },
       { $group: { _id: null, total: { $sum: '$totalMinor' } } },
     ]),
     Sale.countDocuments({ status: SaleStatus.COMPLETED }),
   ]);
-  const byStatus = Object.fromEntries(shops.map((s) => [s._id, s.count]));
-  const totalShops = shops.reduce((s, r) => s + r.count, 0);
+  const byStatus = liveShops.reduce<Record<string, number>>((acc, s) => {
+    acc[s.status] = (acc[s.status] ?? 0) + 1;
+    return acc;
+  }, {});
+  const totalShops = liveShops.length;
   return {
     totalShops,
     activeShops: byStatus.ACTIVE ?? 0,

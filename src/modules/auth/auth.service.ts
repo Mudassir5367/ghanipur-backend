@@ -1,7 +1,8 @@
 import * as userRepo from '../../repositories/dynamo/userRepository.js';
 import type { UserRecord } from '../../repositories/dynamo/userRepository.js';
 import { UniqueConstraintError } from '../../repositories/dynamo/base.js';
-import { Shop, ShopStatus } from '../../models/shop.model.js';
+import * as shopRepo from '../../repositories/dynamo/shopRepository.js';
+import { ShopStatus } from '../../repositories/dynamo/shopRepository.js';
 import { Role } from '../../constants/roles.js';
 import { defaultPermissionsFor, type Permission } from '../../constants/permissions.js';
 import {
@@ -86,8 +87,8 @@ async function createUser(input: userRepo.CreateUserInput): Promise<UserRecord> 
 async function assertShopUsable(user: Pick<UserRecord, 'role' | 'shopId'>): Promise<void> {
   if (user.role !== Role.SHOP_ADMIN && user.role !== Role.SHOP_STAFF) return;
   if (!user.shopId) return; // no shop yet (admin still onboarding)
-  const shop = await Shop.findById(user.shopId, 'status isDeleted').lean();
-  if (!shop || shop.isDeleted || shop.status === ShopStatus.SUSPENDED || shop.status === ShopStatus.INACTIVE) {
+  const shop = await shopRepo.findById(user.shopId);
+  if (!shop || shop.status === ShopStatus.SUSPENDED || shop.status === ShopStatus.INACTIVE) {
     throw ApiError.forbidden('This shop has been suspended. Please contact the platform administrator.', 'SHOP_SUSPENDED');
   }
 }

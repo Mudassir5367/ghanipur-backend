@@ -1,6 +1,6 @@
 import { Payment } from '../../models/payment.model.js';
 import { Customer } from '../../models/customer.model.js';
-import { ShopSettings } from '../../models/shopSettings.model.js';
+import * as settingsRepo from '../../repositories/dynamo/shopSettingsRepository.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { toMinor, formatPKR } from '../../utils/money.js';
 import { parsePagination } from '../../utils/pagination.js';
@@ -12,7 +12,7 @@ import type { TenantContext } from '../../types/context.js';
 import type { CreatePaymentInput } from './payment.validators.js';
 
 async function assertMethod(ctx: TenantContext, method?: string): Promise<string> {
-  const settings = await ShopSettings.findOne({ shopId: ctx.shopId });
+  const settings = await settingsRepo.getOrCreate(ctx.shopId);
   const allowed = settings?.paymentMethods ?? [];
   if (!method) return allowed[0] ?? 'CASH';
   if (allowed.length && !allowed.includes(method)) throw ApiError.badRequest(`Invalid payment method: ${method}`, 'INVALID_PAYMENT_METHOD');

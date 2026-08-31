@@ -7,8 +7,9 @@ import { connectDatabase, disconnectDatabase } from '../config/db.js';
 import { env } from '../config/env.js';
 import { logger } from '../config/logger.js';
 import * as userRepo from '../repositories/dynamo/userRepository.js';
-import { Shop, ShopStatus } from '../models/shop.model.js';
-import { ShopSettings } from '../models/shopSettings.model.js';
+import * as shopRepo from '../repositories/dynamo/shopRepository.js';
+import * as settingsRepo from '../repositories/dynamo/shopSettingsRepository.js';
+import { ShopStatus } from '../repositories/dynamo/shopRepository.js';
 import { Category } from '../models/category.model.js';
 import { Product } from '../models/product.model.js';
 import { Role } from '../constants/roles.js';
@@ -38,15 +39,17 @@ async function seed(): Promise<void> {
   const adminEmail = 'admin@ghanipur.test';
   const password = 'password123';
 
-  // Clean slate for demo entities
-  const existingShop = await Shop.findOne({ slug: 'demo-dairy' });
+  // Clean slate for demo entities. The shop and its settings live in DynamoDB;
+  // hardDelete also releases the slug and owner guards, so re-seeding does not
+  // collide with a stale reservation.
+  const existingShop = await shopRepo.findBySlug('demo-dairy');
   if (existingShop) {
     await Promise.all([
-      Category.deleteMany({ shopId: existingShop._id }),
-      Product.deleteMany({ shopId: existingShop._id }),
-      ShopSettings.deleteMany({ shopId: existingShop._id }),
+      Category.deleteMany({ shopId: existingShop.id }),
+      Product.deleteMany({ shopId: existingShop.id }),
+      settingsRepo.remove(existingShop.id),
     ]);
-    await Shop.deleteOne({ _id: existingShop._id });
+    await shopRepo.hardDelete(existingShop);
   }
   // Users live in DynamoDB now, so the demo accounts are removed there — deleting
   // the email guard too, or re-seeding would collide with the stale reservation.
@@ -71,11 +74,11 @@ async function seed(): Promise<void> {
   });
   // Provision the shop with default settings + starter categories (§3), then activate it.
   const shop = await provisionShop(undefined, { _id: admin.id }, 'Demo Dairy', { phone: '03001112222', status: ShopStatus.ACTIVE });
-  await userRepo.update(admin.id, { shopId: shop._id.toString() });
+  await userRepo.update(admin.id, { shopId: shop.id });
 
   // Products reference the seeded default categories (§62).
-  const ctx = { shopId: shop._id.toString(), impersonated: false };
-  const catByName = async (name: string) => (await Category.findOne({ shopId: shop._id, name }))!._id;
+  const ctx = { shopId: shop.id, impersonated: false };
+  const catByName = async (name: string) => (await Category.findOne({ shopId: shop.id, name }))!._id;
   const milkCat = await catByName('Milk');
   const yogurtCat = await catByName('Yogurt');
   const gheeCat = await catByName('Desi Ghee');
@@ -89,7 +92,7 @@ async function seed(): Promise<void> {
   let buffaloMilkId = '';
   for (const p of demoProducts) {
     const product = await Product.create({
-      shopId: shop._id, categoryId: p.cat, unitId: p.unit,
+      shopId: shop.id, categoryId: p.cat, unitId: p.unit,
       name: p.name, slug: slugify(p.name), sku: slugify(p.name).toUpperCase().replace(/-/g, ''),
       sellingPriceMinor: toMinor(p.sell), purchaseCostMinor: toMinor(p.cost), minStock: p.min,
     });
@@ -106,8 +109,8 @@ async function seed(): Promise<void> {
   await recordPayment(ctx, { customerId: aliHotel._id.toString(), amount: 3000, method: 'CASH' }, admin.id);
 
   await Expense.create([
-    { shopId: shop._id, category: 'Rent', amountMinor: toMinor(50000), createdBy: admin.id },
-    { shopId: shop._id, category: 'Electricity', amountMinor: toMinor(35000), createdBy: admin.id },
+    { shopId: shop.id, category: 'Rent', amountMinor: toMinor(50000), createdBy: admin.id },
+    { shopId: shop.id, category: 'Electricity', amountMinor: toMinor(35000), createdBy: admin.id },
   ]);
 
   logger.info('✅ Seed complete');

@@ -2,7 +2,7 @@ import { Types } from 'mongoose';
 import { Delivery, DeliveryStatus, PaymentType, DELIVERY_TRANSITIONS, derivePaymentStatus } from '../../models/delivery.model.js';
 import { Product } from '../../models/product.model.js';
 import { Customer } from '../../models/customer.model.js';
-import { Shop } from '../../models/shop.model.js';
+import * as shopRepo from '../../repositories/dynamo/shopRepository.js';
 import { dayRange } from '../../utils/dateRange.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { toMinor } from '../../utils/money.js';
@@ -230,7 +230,7 @@ export async function updateDelivery(ctx: TenantContext, id: string, input: Crea
  * midnight (shop timezone) since "today" moves, and new customers appear automatically.
  */
 export async function deliveryRoster(ctx: TenantContext) {
-  const shop = await Shop.findById(ctx.shopId, 'timezone');
+  const shop = await shopRepo.findById(ctx.shopId);
   const range = dayRange(undefined, shop?.timezone ?? 'Asia/Karachi');
   const customers = await Customer.find({ shopId: ctx.shopId, isDeleted: false }).select('name phone address currentBalanceMinor').sort({ name: 1 }).lean();
   const ids = customers.map((c) => String(c._id));

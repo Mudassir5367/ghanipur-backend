@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
 import { registerShop, createSuperAdmin, auth } from './helpers.js';
-import { ShopStatus } from '../src/models/shop.model.js';
+import { ShopStatus } from '../src/repositories/dynamo/shopRepository.js';
 
 const app = createApp();
 

@@ -1,7 +1,7 @@
 import { Types } from 'mongoose';
 import { Customer } from '../../models/customer.model.js';
 import { CustomerLedger } from '../../models/customerLedger.model.js';
-import { ShopSettings } from '../../models/shopSettings.model.js';
+import * as settingsRepo from '../../repositories/dynamo/shopSettingsRepository.js';
 import { tenantRepository } from '../../repositories/tenantRepository.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { toMinor } from '../../utils/money.js';
@@ -18,7 +18,7 @@ const repo = tenantRepository(Customer);
 
 async function assertType(ctx: TenantContext, type?: string): Promise<void> {
   if (!type) return;
-  const settings = await ShopSettings.findOne({ shopId: ctx.shopId });
+  const settings = await settingsRepo.getOrCreate(ctx.shopId);
   const allowed = settings?.customerTypes ?? [];
   if (allowed.length && !allowed.includes(type)) {
     throw ApiError.badRequest(`Invalid customer type: ${type}`, 'INVALID_CUSTOMER_TYPE');

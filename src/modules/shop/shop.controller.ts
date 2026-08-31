@@ -43,7 +43,7 @@ export const createMyShop = asyncHandler(async (req: Request, res: Response) => 
   const shop = await shopService.createMyShop(req.auth!.userId, req.body);
   const tokens = await issueTokensForUser(req.auth!.userId);
   setRefreshCookie(res, tokens.refreshToken);
-  await recordAudit({ actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: shop._id.toString(), action: 'SHOP_SELF_CREATE', resource: 'Shop', resourceId: shop._id.toString(), ip: req.ip });
+  await recordAudit({ actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: shop.id, action: 'SHOP_SELF_CREATE', resource: 'Shop', resourceId: shop.id, ip: req.ip });
   created(res, { shop, accessToken: tokens.accessToken, user: tokens.user });
 });
 
@@ -71,7 +71,7 @@ export const getShop = asyncHandler(async (req: Request, res: Response) => {
 
 export const createShop = asyncHandler(async (req: Request, res: Response) => {
   const shop = await shopService.createShop(req.body);
-  await recordAudit({ actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: shop._id.toString(), action: 'SHOP_CREATE', resource: 'Shop', resourceId: shop._id.toString(), ip: req.ip });
+  await recordAudit({ actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: shop.id, action: 'SHOP_CREATE', resource: 'Shop', resourceId: shop.id, ip: req.ip });
   created(res, { shop });
 });
 

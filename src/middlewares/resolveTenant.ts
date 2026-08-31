@@ -1,7 +1,8 @@
 import type { Request, Response, NextFunction } from 'express';
 import { ApiError } from '../utils/ApiError.js';
 import { Role } from '../constants/roles.js';
-import { Shop, ShopStatus } from '../models/shop.model.js';
+import * as shopRepo from '../repositories/dynamo/shopRepository.js';
+import { ShopStatus } from '../repositories/dynamo/shopRepository.js';
 import { recordAudit } from '../services/audit.service.js';
 
 /**
@@ -21,8 +22,8 @@ export async function resolveTenant(req: Request, _res: Response, next: NextFunc
 
     if (auth.role === Role.SHOP_ADMIN || auth.role === Role.SHOP_STAFF) {
       if (!auth.shopId) throw ApiError.forbidden('User is not attached to a shop', 'NO_SHOP');
-      const shop = await Shop.findById(auth.shopId, 'status isDeleted').lean();
-      if (!shop || shop.isDeleted || shop.status === ShopStatus.SUSPENDED || shop.status === ShopStatus.INACTIVE) {
+      const shop = await shopRepo.findById(auth.shopId);
+      if (!shop || shop.status === ShopStatus.SUSPENDED || shop.status === ShopStatus.INACTIVE) {
         throw ApiError.forbidden('This shop has been suspended. Please contact the platform administrator.', 'SHOP_SUSPENDED');
       }
       req.tenant = { shopId: auth.shopId, impersonated: false };

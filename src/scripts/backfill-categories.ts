@@ -8,20 +8,20 @@
  */
 import { connectDatabase, disconnectDatabase } from '../config/db.js';
 import { logger } from '../config/logger.js';
-import { Shop } from '../models/shop.model.js';
+import * as shopRepo from '../repositories/dynamo/shopRepository.js';
 import { Category } from '../models/category.model.js';
 import { DEFAULT_CATEGORIES } from '../constants/categories.js';
 import { slugify } from '../utils/slug.js';
 
 async function run(): Promise<void> {
   await connectDatabase();
-  const shops = await Shop.find({ isDeleted: false }, '_id name slug');
+  const shops = await shopRepo.listAllActive();
   let fixed = 0;
   for (const shop of shops) {
-    const count = await Category.countDocuments({ shopId: shop._id, isDeleted: false });
+    const count = await Category.countDocuments({ shopId: shop.id, isDeleted: false });
     if (count > 0) continue;
     await Category.create(
-      DEFAULT_CATEGORIES.map((name, i) => ({ shopId: shop._id, name, slug: slugify(name), sortOrder: i })),
+      DEFAULT_CATEGORIES.map((name, i) => ({ shopId: shop.id, name, slug: slugify(name), sortOrder: i })),
     );
     fixed += 1;
     logger.info(`Seeded ${DEFAULT_CATEGORIES.length} categories into ${shop.slug}`);

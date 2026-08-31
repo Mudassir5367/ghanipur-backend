@@ -4,7 +4,7 @@ import * as userRepo from '../src/repositories/dynamo/userRepository.js';
 import { Role } from '../src/constants/roles.js';
 import { hashPassword } from '../src/services/token.service.js';
 import { provisionShop } from '../src/modules/shop/shop.service.js';
-import { ShopStatus } from '../src/models/shop.model.js';
+import { ShopStatus } from '../src/repositories/dynamo/shopRepository.js';
 
 export interface TestActor {
   token: string;
@@ -28,11 +28,11 @@ export async function registerShop(
   const password = overrides.password ?? 'password123';
   const user = await userRepo.create({ name: 'Owner', email, passwordHash: await hashPassword(password), role: Role.SHOP_ADMIN });
   const shop = await provisionShop(undefined, { _id: user.id }, overrides.shopName ?? 'Test Dairy', { status: overrides.status ?? ShopStatus.PENDING, seedCategories: false });
-  await userRepo.update(user.id, { shopId: shop._id.toString() });
+  await userRepo.update(user.id, { shopId: shop.id });
 
   const res = await request(app).post('/api/v1/auth/login').send({ email, password });
   if (res.status !== 200) throw new Error(`registerShop login failed: ${res.status} ${JSON.stringify(res.body)}`);
-  return { token: res.body.data.accessToken, userId: user.id, shopId: shop._id.toString(), email };
+  return { token: res.body.data.accessToken, userId: user.id, shopId: shop.id, email };
 }
 
 /** Create a SUPER_ADMIN directly and log in to obtain a token. */

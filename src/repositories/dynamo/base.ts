@@ -27,12 +27,26 @@ export class UniqueConstraintError extends Error {
   }
 }
 
+/**
+ * Adds the `_id` alias every API response and the frontend still use.
+ *
+ * Mongo documents were identified by `_id`; DynamoDB items use `id`. Renaming
+ * the field in responses would be a breaking change for every screen, so
+ * records handed out carry both — `id` is the real key, `_id` mirrors it. Drop
+ * this once the clients are migrated.
+ */
+export function withLegacyId<T extends { id: string }>(record: T): T & { _id: string };
+export function withLegacyId<T extends { id: string }>(record: T | null): (T & { _id: string }) | null;
+export function withLegacyId<T extends { id: string }>(record: T | null): (T & { _id: string }) | null {
+  return record ? Object.assign(record, { _id: record.id }) : null;
+}
+
 export async function getItem<T>(table: string, key: Key): Promise<T | null> {
   const res = await ddb.send(new GetCommand({ TableName: table, Key: key }));
   return (res.Item as T | undefined) ?? null;
 }
 
-export async function putItem(table: string, item: Item): Promise<void> {
+export async function putItem<T extends object>(table: string, item: T): Promise<void> {
   await ddb.send(new PutCommand({ TableName: table, Item: item }));
 }
 
@@ -125,6 +139,92 @@ export async function queryPageByIndex<T>(
   };
 }
 
+/**
+ * Every item under one partition key, following LastEvaluatedKey to the end.
+ *
+ * The REST contract returns `{page, limit, total, totalPages}`, which DynamoDB
+ * cannot produce — it has no offset and no cheap COUNT. Reading a shop's
+ * partition and filtering/sorting/slicing in memory preserves that contract
+ * exactly, and the read stays inside one tenant because shopId is the partition
+ * key. `hardCap` bounds the blast radius: a shop that outgrows it needs a real
+ * cursor API rather than a silently truncated page.
+ */
+export async function queryAllByPartition<T>(
+  table: string,
+  attribute: string,
+  value: string,
+  opts: { indexName?: string; hardCap?: number } = {},
+): Promise<T[]> {
+  const hardCap = opts.hardCap ?? 5_000;
+  const all: T[] = [];
+  let startKey: Record<string, unknown> | undefined;
+  do {
+    const res = await ddb.send(
+      new QueryCommand({
+        TableName: table,
+        ...(opts.indexName ? { IndexName: opts.indexName } : {}),
+        KeyConditionExpression: '#k = :v',
+        ExpressionAttributeNames: { '#k': attribute },
+        ExpressionAttributeValues: { ':v': value },
+        ExclusiveStartKey: startKey,
+      }),
+    );
+    all.push(...((res.Items ?? []) as T[]));
+    startKey = res.LastEvaluatedKey;
+  } while (startKey && all.length < hardCap);
+  return all;
+}
+
+/**
+ * Atomically adds `delta` to a numeric attribute and returns the resulting
+ * value, optionally refusing the write unless a condition holds.
+ *
+ * This is what replaces Mongo's `findOneAndUpdate({$inc}, {new:true})` for stock
+ * and ledger balances. It matters that UpdateItem — unlike TransactWriteItems,
+ * which returns nothing — can both apply the change and hand back the new value
+ * in one atomic call, so "decrement only if enough remains, and tell me what is
+ * left" needs no read-modify-write and no transaction.
+ *
+ * Returns null when the condition fails, letting callers distinguish "not
+ * allowed" from a genuine error.
+ */
+export async function atomicAdd(
+  table: string,
+  key: Key,
+  attribute: string,
+  delta: number,
+  opts: { minResult?: number } = {},
+): Promise<number | null> {
+  const names: Record<string, string> = { '#a': attribute };
+  const values: Record<string, unknown> = { ':d': delta };
+  let condition: string | undefined;
+
+  if (opts.minResult !== undefined) {
+    // Guard against going below the floor. attribute_not_exists covers a first
+    // write, where DynamoDB treats a missing number as 0 for ADD.
+    values[':floor'] = opts.minResult - delta;
+    condition = `attribute_not_exists(#a) OR #a >= :floor`;
+  }
+
+  try {
+    const res = await ddb.send(
+      new UpdateCommand({
+        TableName: table,
+        Key: key,
+        UpdateExpression: 'ADD #a :d',
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
+        ...(condition ? { ConditionExpression: condition } : {}),
+        ReturnValues: 'UPDATED_NEW',
+      }),
+    );
+    return (res.Attributes?.[attribute] as number | undefined) ?? null;
+  } catch (err) {
+    if ((err as { name?: string }).name === 'ConditionalCheckFailedException') return null;
+    throw err;
+  }
+}
+
 export function encodeCursor(key: Record<string, unknown> | undefined): string | null {
   if (!key) return null;
   return Buffer.from(JSON.stringify(key), 'utf8').toString('base64url');
@@ -163,6 +263,8 @@ export async function putWithGuards<T extends object>(
   table: string,
   item: T,
   guards: GuardSpec[],
+  /** Extra rows written in the SAME transaction — e.g. a shop's settings row. */
+  alsoPut: { table: string; item: object }[] = [],
 ): Promise<void> {
   const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
     { Put: { TableName: table, Item: item } },
@@ -174,6 +276,7 @@ export async function putWithGuards<T extends object>(
         ExpressionAttributeNames: { '#pk': g.pkName },
       },
     })),
+    ...alsoPut.map((p) => ({ Put: { TableName: p.table, Item: p.item } })),
   ];
 
   try {
