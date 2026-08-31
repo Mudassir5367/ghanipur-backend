@@ -2,6 +2,8 @@ import {
   CreateTableCommand,
   DescribeTableCommand,
   DescribeTimeToLiveCommand,
+  DescribeContinuousBackupsCommand,
+  UpdateContinuousBackupsCommand,
   UpdateTableCommand,
   UpdateTimeToLiveCommand,
   waitUntilTableExists,
@@ -121,6 +123,39 @@ async function exists(name: string): Promise<boolean> {
   }
 }
 
+/**
+ * Turns on point-in-time recovery, which is OFF by default on a new table.
+ *
+ * DynamoDB is the only datastore, so without this a bad deploy or a mistaken
+ * delete has no undo for any sale, ledger entry or customer. Doing it here means
+ * a table can never be created without backups — leaving it as a manual step is
+ * how the next table silently ends up unprotected.
+ */
+async function ensurePitr(name: string): Promise<boolean> {
+  // DynamoDB Local does not implement continuous backups. Skipping keeps the
+  // test harness working against the emulator; there is nothing to protect there.
+  if (process.env.DYNAMO_ENDPOINT) return false;
+  try {
+    const current = await ddbClient.send(new DescribeContinuousBackupsCommand({ TableName: name }));
+    if (current.ContinuousBackupsDescription?.PointInTimeRecoveryDescription?.PointInTimeRecoveryStatus === 'ENABLED') {
+      return false;
+    }
+    await ddbClient.send(
+      new UpdateContinuousBackupsCommand({
+        TableName: name,
+        PointInTimeRecoverySpecification: { PointInTimeRecoveryEnabled: true },
+      }),
+    );
+    return true;
+  } catch (err) {
+    // Missing permission must not fail provisioning — check:dynamo reports the
+    // gap loudly instead, so an under-privileged run is visible, not silent.
+    const code = (err as { name?: string }).name;
+    if (code === 'AccessDeniedException' || code === 'UnknownOperationException') return false;
+    throw err;
+  }
+}
+
 /** TTL is a separate API call — it cannot be set as part of CreateTable. */
 async function ensureTtl(name: string, attribute: string): Promise<boolean> {
   const current = await ddbClient.send(new DescribeTimeToLiveCommand({ TableName: name }));
@@ -170,6 +205,8 @@ export async function provisionAll(log: (msg: string) => void = () => {}): Promi
       log(`  created ${name}`);
       created += 1;
     }
+
+    if (await ensurePitr(name)) log('          -> point-in-time recovery enabled');
 
     if (def.ttlAttribute && (await ensureTtl(name, def.ttlAttribute))) {
       log(`          -> TTL enabled on "${def.ttlAttribute}"`);

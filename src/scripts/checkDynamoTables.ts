@@ -1,6 +1,7 @@
 import {
   DescribeTableCommand,
   DescribeTimeToLiveCommand,
+  DescribeContinuousBackupsCommand,
   type GlobalSecondaryIndexDescription,
   type KeySchemaElement,
 } from '@aws-sdk/client-dynamodb';
@@ -36,6 +37,29 @@ function describeKeys(schema: KeySchemaElement[] | undefined): string {
 
 function expectedKeys(def: TableDef): string {
   return def.sk ? `${def.pk.name} (HASH) + ${def.sk.name} (RANGE)` : `${def.pk.name} (HASH)`;
+}
+
+/**
+ * Point-in-time recovery is the only thing standing between a bad write and
+ * permanent data loss, since DynamoDB is the sole datastore. A table without it
+ * is a real finding, not a warning — so it counts as a problem and fails the run.
+ *
+ * Skipped against DynamoDB Local, which has no such API.
+ */
+async function checkPitr(name: string, problems: Problem[]): Promise<boolean> {
+  if (process.env.DYNAMO_ENDPOINT) return true;
+  try {
+    const res = await ddbClient.send(new DescribeContinuousBackupsCommand({ TableName: name }));
+    const status = res.ContinuousBackupsDescription?.PointInTimeRecoveryDescription?.PointInTimeRecoveryStatus;
+    if (status !== 'ENABLED') {
+      problems.push({ table: name, issue: `point-in-time recovery is ${status ?? 'DISABLED'} — no recovery from a bad write` });
+      return false;
+    }
+    return true;
+  } catch (err) {
+    problems.push({ table: name, issue: `could not read backup status: ${(err as { name?: string }).name}` });
+    return false;
+  }
 }
 
 async function checkTtl(name: string, attr: string, problems: Problem[]): Promise<void> {
@@ -104,10 +128,11 @@ async function main(): Promise<void> {
 
       const gsiCount = checkGsis(name, def, table.GlobalSecondaryIndexes, problems);
       if (def.ttlAttribute) await checkTtl(name, def.ttlAttribute, problems);
+      const pitr = await checkPitr(name, problems);
 
       const items = table.ItemCount ?? 0;
       // eslint-disable-next-line no-console
-      console.log(`  ok  ${name.padEnd(24)} ${String(gsiCount).padStart(2)} GSI  ${items} items`);
+      console.log(`  ok  ${name.padEnd(24)} ${String(gsiCount).padStart(2)} GSI  ${items} items  ${pitr ? "PITR on" : "PITR OFF"}`);
       ok += 1;
     } catch (err) {
       const e = err as { name?: string; message?: string };
