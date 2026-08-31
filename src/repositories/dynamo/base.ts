@@ -19,6 +19,21 @@ import { ddb } from '../../config/dynamo.js';
 export type Key = Record<string, string>;
 export type Item = Record<string, unknown>;
 
+/**
+ * Builds the composite partition keys the schema uses for GSIs — "shopId#slug",
+ * "shopId#ACTIVE" and so on. DynamoDB indexes on a single attribute, so a
+ * two-part access pattern is encoded into one string at write time.
+ */
+export const compositeKey = (...parts: (string | number | boolean)[]): string => parts.join('#');
+
+/**
+ * Sortable sort-key prefix: an ISO timestamp then the id, so a Query returns
+ * rows in chronological order and the id keeps it unique when two land in the
+ * same millisecond.
+ */
+export const timeKey = (at: Date | string, id: string): string =>
+  `${typeof at === 'string' ? at : at.toISOString()}#${id}`;
+
 /** Thrown when a uniqueness guard rejects a write, so services can map it to 409. */
 export class UniqueConstraintError extends Error {
   constructor(public readonly field: string) {
