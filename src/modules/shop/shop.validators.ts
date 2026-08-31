@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ShopStatus } from '../../models/shop.model.js';
+import { imageUrl } from '../../utils/validators.js';
 
 const geoSchema = z.object({ lat: z.number(), lng: z.number() }).partial();
 
@@ -25,8 +26,8 @@ const deliverySettingsSchema = z
 export const updateShopSchema = z
   .object({
     name: z.string().trim().min(2).max(80),
-    logo: z.string().url().nullable(),
-    banner: z.string().url().nullable(),
+    logo: imageUrl.nullable(),
+    banner: imageUrl.nullable(),
     description: z.string().max(2000),
     phone: z.string().trim().max(20),
     whatsapp: z.string().trim().max(20),

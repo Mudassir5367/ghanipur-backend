@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { objectId } from '../../utils/validators.js';
+import { objectId, imageUrl } from '../../utils/validators.js';
 import { ProductStatus } from '../../models/product.model.js';
 import { InventoryTxnType } from '../../constants/inventory.js';
 
@@ -11,7 +11,7 @@ export const createProductSchema = z.object({
   unitId: objectId,
   sku: z.string().trim().min(1).max(40).optional(),
   description: z.string().max(2000).optional(),
-  images: z.array(z.string().url()).max(8).optional(),
+  images: z.array(imageUrl).max(8).optional(),
   unitValue: z.number().positive().optional(),
   sellingPrice: money, // required
   purchaseCost: money, // required — needed for profit (selling − cost)

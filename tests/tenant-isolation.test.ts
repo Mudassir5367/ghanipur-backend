@@ -88,7 +88,7 @@ describe('Tenant isolation (§61)', () => {
     const unitId = unitsA.body.data.find((u: { symbol: string }) => u.symbol === 'L')._id;
     const catA = await request(app).post('/api/v1/categories').set(auth(shopA.token)).send({ name: 'A Milk' });
     const catAId = catA.body.data.category._id;
-    const prodA = await request(app).post('/api/v1/products').set(auth(shopA.token)).send({ name: 'A Product', categoryId: catAId, unitId, sellingPrice: 200, openingStock: 20 });
+    const prodA = await request(app).post('/api/v1/products').set(auth(shopA.token)).send({ name: 'A Product', categoryId: catAId, unitId, sellingPrice: 200, purchaseCost: 160, openingStock: 20 });
     const prodAId = prodA.body.data.product._id;
 
     // Shop B sees none of Shop A's catalog
@@ -114,7 +114,7 @@ describe('Tenant isolation (§61)', () => {
     const unitsA = await request(app).get('/api/v1/units').set(auth(shopA.token));
     const unitId = unitsA.body.data.find((u: { symbol: string }) => u.symbol === 'L')._id;
     const catA = await request(app).post('/api/v1/categories').set(auth(shopA.token)).send({ name: 'A Milk' });
-    const prodA = await request(app).post('/api/v1/products').set(auth(shopA.token)).send({ name: 'A Milk', categoryId: catA.body.data.category._id, unitId, sellingPrice: 200, openingStock: 50 });
+    const prodA = await request(app).post('/api/v1/products').set(auth(shopA.token)).send({ name: 'A Milk', categoryId: catA.body.data.category._id, unitId, sellingPrice: 200, purchaseCost: 160, openingStock: 50 });
     const custA = await request(app).post('/api/v1/customers').set(auth(shopA.token)).send({ name: 'A Customer' });
     const custAId = custA.body.data.customer._id;
     const saleA = await request(app).post('/api/v1/sales').set(auth(shopA.token)).send({ type: 'CREDIT', customerId: custAId, items: [{ productId: prodA.body.data.product._id, quantity: 5 }] });

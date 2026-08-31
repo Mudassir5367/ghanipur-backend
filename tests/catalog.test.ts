@@ -56,7 +56,7 @@ describe('Categories', () => {
     const owner = await registerShop(app);
     const unitId = await getLitreUnitId(owner.token);
     const categoryId = await makeCategory(owner.token, 'Milk');
-    await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Cow Milk', categoryId, unitId, sellingPrice: 200 });
+    await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Cow Milk', categoryId, unitId, sellingPrice: 200, purchaseCost: 160 });
 
     const del = await request(app).delete(`/api/v1/categories/${categoryId}`).set(auth(owner.token));
     expect(del.status).toBe(409);
@@ -104,8 +104,8 @@ describe('Products & inventory', () => {
     const owner = await registerShop(app);
     const unitId = await getLitreUnitId(owner.token);
     const categoryId = await makeCategory(owner.token, 'Milk');
-    await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Low', categoryId, unitId, sellingPrice: 100, minStock: 10, openingStock: 5 });
-    await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'High', categoryId, unitId, sellingPrice: 100, minStock: 10, openingStock: 50 });
+    await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Low', categoryId, unitId, sellingPrice: 100, purchaseCost: 80, minStock: 10, openingStock: 5 });
+    await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'High', categoryId, unitId, sellingPrice: 100, purchaseCost: 80, minStock: 10, openingStock: 50 });
 
     const low = await request(app).get('/api/v1/products?lowStock=true').set(auth(owner.token));
     expect(low.body.data.length).toBe(1);

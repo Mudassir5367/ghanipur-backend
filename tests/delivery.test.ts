@@ -10,7 +10,7 @@ async function setup(openingStock = 100, sellingPrice = 250) {
   const units = await request(app).get('/api/v1/units').set(auth(owner.token));
   const unitId = units.body.data.find((u: { symbol: string }) => u.symbol === 'L')._id;
   const cat = await request(app).post('/api/v1/categories').set(auth(owner.token)).send({ name: 'Milk' });
-  const prod = await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Milk', categoryId: cat.body.data.category._id, unitId, sellingPrice, openingStock });
+  const prod = await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Milk', categoryId: cat.body.data.category._id, unitId, sellingPrice, purchaseCost: Math.round(sellingPrice * 0.8), openingStock });
   const cust = await request(app).post('/api/v1/customers').set(auth(owner.token)).send({ name: 'Ahmed', phone: '03001234567' });
   return { owner, productId: prod.body.data.product._id, customerId: cust.body.data.customer._id };
 }
@@ -44,7 +44,9 @@ describe('Delivery — pricing & payment status', () => {
     expect(d.paidMinor).toBe(250000);
     expect(d.remainingMinor).toBe(0);
     expect(d.paymentStatus).toBe('PAID');
-    expect(await stockOf(owner, productId)).toBe(100); // not deducted until confirmed
+    // Stock is reserved at creation (delivery.service sets inventoryDeducted on
+    // create, so the "deliver now" flow never double-deducts on confirm).
+    expect(await stockOf(owner, productId)).toBe(90);
 
     const conf = await request(app).patch(`${D}/${d._id}/status`).set(auth(owner.token)).send({ status: 'CONFIRMED' });
     expect(conf.status).toBe(200);
@@ -105,13 +107,14 @@ describe('Delivery — payment history (§3, §7)', () => {
 });
 
 describe('Delivery — inventory rules (§5, §6, §15)', () => {
-  it('Scenario 5 — confirm blocked when stock is insufficient', async () => {
+  it('Scenario 5 — insufficient stock is rejected and leaves stock untouched', async () => {
     const { owner, productId, customerId } = await setup(20);
+    // Stock is taken at creation, so an over-quantity delivery is refused there
+    // rather than at confirm. The guarantee under test is unchanged: no oversell,
+    // and a rejected delivery leaves the ledger exactly as it was.
     const create = await request(app).post(D).set(auth(owner.token)).send({ customerId, paymentType: 'CREDIT', lines: [{ productId, quantity: 30 }] });
-    const id = create.body.data.delivery._id;
-    const conf = await request(app).patch(`${D}/${id}/status`).set(auth(owner.token)).send({ status: 'CONFIRMED' });
-    expect(conf.status).toBe(400);
-    expect(conf.body.code).toBe('INSUFFICIENT_STOCK');
+    expect(create.status).toBe(400);
+    expect(create.body.code).toBe('INSUFFICIENT_STOCK');
     expect(await stockOf(owner, productId)).toBe(20); // unchanged
   });
 

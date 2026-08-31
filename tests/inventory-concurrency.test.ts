@@ -21,7 +21,7 @@ describe('Inventory concurrency (§36)', () => {
     const prodRes = await request(app)
       .post('/api/v1/products')
       .set(auth(owner.token))
-      .send({ name: 'Milk', categoryId, unitId, sellingPrice: 250, openingStock: 10 });
+      .send({ name: 'Milk', categoryId, unitId, sellingPrice: 250, purchaseCost: 200, openingStock: 10 });
     const productId = prodRes.body.data.product._id;
 
     // 25 concurrent wastages of 1L against 10L of stock.

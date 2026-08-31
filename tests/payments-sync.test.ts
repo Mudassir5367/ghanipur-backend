@@ -11,7 +11,7 @@ async function setup(sellingPrice = 500) {
   const units = await request(app).get('/api/v1/units').set(auth(owner.token));
   const unitId = units.body.data.find((u: { symbol: string }) => u.symbol === 'L')._id;
   const cat = await request(app).post('/api/v1/categories').set(auth(owner.token)).send({ name: 'Milk' });
-  const prod = await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Milk', categoryId: cat.body.data.category._id, unitId, sellingPrice, openingStock: 1000 });
+  const prod = await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Milk', categoryId: cat.body.data.category._id, unitId, sellingPrice, purchaseCost: Math.round(sellingPrice * 0.8), openingStock: 1000 });
   const cust = await request(app).post('/api/v1/customers').set(auth(owner.token)).send({ name: 'Delivery 1' });
   return { owner, productId: prod.body.data.product._id, customerId: cust.body.data.customer._id };
 }

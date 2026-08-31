@@ -26,8 +26,8 @@ describe('SKU generation (§4)', () => {
 
   it('keeps SKUs unique even when the same value is submitted twice', async () => {
     const { owner, unitId, categoryId } = await setup();
-    const a = await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Milk A', categoryId, unitId, sellingPrice: 200, sku: 'MILK-0001' });
-    const b = await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Milk B', categoryId, unitId, sellingPrice: 200, sku: 'MILK-0001' });
+    const a = await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Milk A', categoryId, unitId, sellingPrice: 200, purchaseCost: 160, sku: 'MILK-0001' });
+    const b = await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Milk B', categoryId, unitId, sellingPrice: 200, purchaseCost: 160, sku: 'MILK-0001' });
     expect(a.status).toBe(201);
     expect(b.status).toBe(201);
     expect(a.body.data.product.sku).not.toBe(b.body.data.product.sku); // de-duplicated
@@ -51,7 +51,7 @@ describe('Product image upload (§8)', () => {
     expect(up.status).toBe(200);
     expect(up.body.data.url).toMatch(/\/uploads\/.+\.png$/);
 
-    const prod = await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Milk', categoryId, unitId, sellingPrice: 250, images: [up.body.data.url] });
+    const prod = await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Milk', categoryId, unitId, sellingPrice: 250, purchaseCost: 200, images: [up.body.data.url] });
     expect(prod.status).toBe(201);
     expect(prod.body.data.product.images[0]).toBe(up.body.data.url);
   });

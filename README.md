@@ -87,7 +87,7 @@ Foundation & auth (RBAC, JWT + refresh) · multi-tenant shops (approval lifecycl
 settings, staff) · dynamic categories/units/products · concurrency-safe inventory
 ledger · atomic cash/credit sales · customer ledger + payments + reversals ·
 deliveries · timezone-aware reports & dashboards + daily-milk management · public
-storefront + SEO · hardening + production Docker. **70 backend tests across 14 suites,
+storefront + SEO · hardening + production Docker. **82 backend tests across 15 suites,
 all green** (incl. tenant isolation §61, inventory/ledger concurrency §36/§37, atomic
 sale rollback §48). See [`docs/ROADMAP.md`](docs/ROADMAP.md) and
 [`docs/AUDIT.md`](docs/AUDIT.md). Frontend builds clean (`next build`, standalone).

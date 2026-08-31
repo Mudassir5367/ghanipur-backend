@@ -1,11 +1,11 @@
 import { z } from 'zod';
-import { objectId } from '../../utils/validators.js';
+import { objectId, imageUrl } from '../../utils/validators.js';
 import { CategoryStatus } from '../../models/category.model.js';
 
 export const createCategorySchema = z.object({
   name: z.string().trim().min(1).max(80),
   description: z.string().max(1000).optional(),
-  image: z.string().url().nullable().optional(),
+  image: imageUrl.nullable().optional(),
   icon: z.string().max(80).nullable().optional(),
   parentId: objectId.nullable().optional(),
   sortOrder: z.number().int().optional(),

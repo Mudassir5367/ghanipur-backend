@@ -10,7 +10,7 @@ async function setup(openingStock = 100) {
   const units = await request(app).get('/api/v1/units').set(auth(owner.token));
   const unitId = units.body.data.find((u: { symbol: string }) => u.symbol === 'L')._id;
   const cat = await request(app).post('/api/v1/categories').set(auth(owner.token)).send({ name: 'Milk' });
-  const prod = await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Buffalo Milk', categoryId: cat.body.data.category._id, unitId, sellingPrice: 250, openingStock });
+  const prod = await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Buffalo Milk', categoryId: cat.body.data.category._id, unitId, sellingPrice: 250, purchaseCost: 200, openingStock });
   const productId = prod.body.data.product._id;
   return { owner, productId };
 }
@@ -96,7 +96,7 @@ describe('Atomicity (§48)', () => {
     const units = await request(app).get('/api/v1/units').set(auth(owner.token));
     const unitId = units.body.data.find((u: { symbol: string }) => u.symbol === 'L')._id;
     const cat = await request(app).post('/api/v1/categories').set(auth(owner.token)).send({ name: 'Ghee' });
-    const p2 = await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Ghee', categoryId: cat.body.data.category._id, unitId, sellingPrice: 2600, openingStock: 2 });
+    const p2 = await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Ghee', categoryId: cat.body.data.category._id, unitId, sellingPrice: 2600, purchaseCost: 2200, openingStock: 2 });
     const p2Id = p2.body.data.product._id;
 
     const res = await request(app).post('/api/v1/sales').set(auth(owner.token)).send({ type: 'CASH', items: [{ productId, quantity: 5 }, { productId: p2Id, quantity: 5 }] });

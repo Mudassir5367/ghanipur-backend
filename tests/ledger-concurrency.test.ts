@@ -16,7 +16,7 @@ describe('Ledger concurrency (§37)', () => {
     const units = await request(app).get('/api/v1/units').set(auth(owner.token));
     const unitId = units.body.data.find((u: { symbol: string }) => u.symbol === 'L')._id;
     const cat = await request(app).post('/api/v1/categories').set(auth(owner.token)).send({ name: 'Milk' });
-    const prod = await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Milk', categoryId: cat.body.data.category._id, unitId, sellingPrice: 250, openingStock: 100 });
+    const prod = await request(app).post('/api/v1/products').set(auth(owner.token)).send({ name: 'Milk', categoryId: cat.body.data.category._id, unitId, sellingPrice: 250, purchaseCost: 200, openingStock: 100 });
     const productId = prod.body.data.product._id;
     const cust = await request(app).post('/api/v1/customers').set(auth(owner.token)).send({ name: 'Hotel' });
     const customerId = cust.body.data.customer._id;
