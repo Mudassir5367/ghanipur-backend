@@ -8,7 +8,10 @@
 FROM node:20-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+# Clearing npm's cache inside the same layer keeps it out of the image AND off
+# the build host's disk — it is several hundred MB, which is the difference
+# between this building and failing on a small root volume.
+RUN npm ci --no-audit --no-fund && npm cache clean --force
 COPY tsconfig.json ./
 COPY src ./src
 # Prune dev deps after compiling so the runtime stage can copy node_modules
