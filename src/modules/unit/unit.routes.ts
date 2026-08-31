@@ -7,7 +7,7 @@ import { resolveTenant } from '../../middlewares/resolveTenant.js';
 import { validate } from '../../middlewares/validate.js';
 import { asyncHandler, ok, created } from '../../utils/http.js';
 import { Permission } from '../../constants/permissions.js';
-import { UnitKind } from '../../models/unit.model.js';
+import { UnitKind } from '../../repositories/dynamo/unitRepository.js';
 import type { Request, Response } from 'express';
 import type { TenantContext } from '../../types/context.js';
 

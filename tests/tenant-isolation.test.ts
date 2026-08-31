@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
 import { registerShop, createSuperAdmin, auth } from './helpers.js';
-import { AuditLog } from '../src/models/auditLog.model.js';
+import { auditLogs } from '../src/repositories/dynamo/miscRepositories.js';
 
 const app = createApp();
 
@@ -68,7 +68,7 @@ describe('Tenant isolation (§61)', () => {
     expect(res.status).toBe(200);
     expect(res.body.data.shop._id).toBe(shopB.shopId);
 
-    const audit = await AuditLog.findOne({ action: 'IMPERSONATE_SHOP', shopId: shopB.shopId });
+    const audit = (await auditLogs.listByShop(shopB.shopId)).find((a) => a.action === 'IMPERSONATE_SHOP');
     expect(audit).not.toBeNull();
   });
 

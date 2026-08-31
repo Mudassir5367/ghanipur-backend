@@ -25,7 +25,7 @@ export const get = asyncHandler(async (req: Request, res: Response) => {
 
 export const create = asyncHandler(async (req: Request, res: Response) => {
   const category = await service.createCategory(ctx(req), req.body);
-  await recordAudit({ actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: ctx(req).shopId, action: 'CATEGORY_CREATE', resource: 'Category', resourceId: category._id.toString(), ip: req.ip });
+  await recordAudit({ actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: ctx(req).shopId, action: 'CATEGORY_CREATE', resource: 'Category', resourceId: category.id, ip: req.ip });
   created(res, { category });
 });
 

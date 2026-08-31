@@ -32,7 +32,7 @@ export const suggestSku = asyncHandler(async (req: Request, res: Response) => {
 
 export const create = asyncHandler(async (req: Request, res: Response) => {
   const product = await service.createProduct(ctx(req), req.body, req.auth!.userId);
-  await recordAudit({ actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: ctx(req).shopId, action: 'PRODUCT_CREATE', resource: 'Product', resourceId: product._id.toString(), ip: req.ip });
+  await recordAudit({ actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: ctx(req).shopId, action: 'PRODUCT_CREATE', resource: 'Product', resourceId: product.id, ip: req.ip });
   created(res, { product });
 });
 

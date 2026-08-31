@@ -94,6 +94,20 @@ export async function listByShopType(shopId: string, type: InventoryTxnType): Pr
   return rows.map((r) => withLegacyId(r));
 }
 
+/**
+ * Removes a movement row. COMPENSATION ONLY.
+ *
+ * The ledger is append-only in normal operation — a return or correction is a
+ * new opposing movement, never a deletion. This exists solely to unwind a
+ * multi-item write that failed partway: Mongo rolled those rows back with a
+ * transaction, and without it a sale that never completed would leave stock
+ * movements referencing a sale that does not exist.
+ */
+export async function removeForCompensation(productId: string, sk: string): Promise<void> {
+  const { deleteItem } = await import('./base.js');
+  await deleteItem(TXNS, { productId, sk });
+}
+
 export async function listByRef(refType: RefType, refId: string): Promise<InventoryTransactionRecord[]> {
   const rows = await queryAllByPartition<InventoryTransactionRecord>(
     TXNS,

@@ -1,11 +1,9 @@
 import { createApp } from './app.js';
-import { connectDatabase, disconnectDatabase } from './config/db.js';
 import { pingDatabase as pingDynamo } from './config/dynamo.js';
 import { env } from './config/env.js';
 import { logger } from './config/logger.js';
 
 async function bootstrap(): Promise<void> {
-  await connectDatabase();
   await pingDynamo();
   const app = createApp();
 
@@ -15,10 +13,9 @@ async function bootstrap(): Promise<void> {
 
   const shutdown = async (signal: string): Promise<void> => {
     logger.info(`${signal} received, shutting down gracefully...`);
-    server.close(async () => {
-      await disconnectDatabase();
-      process.exit(0);
-    });
+    // DynamoDB is stateless HTTP — there is no connection pool to drain, so
+    // closing the listener is the whole shutdown.
+    server.close(() => process.exit(0));
     // Force-exit if graceful shutdown stalls
     setTimeout(() => process.exit(1), 10_000).unref();
   };

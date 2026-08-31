@@ -3,7 +3,6 @@ import helmet from 'helmet';
 import compression from 'compression';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
-import mongoSanitize from 'express-mongo-sanitize';
 import rateLimit from 'express-rate-limit';
 import { pinoHttp } from 'pino-http';
 import { randomUUID } from 'node:crypto';
@@ -42,8 +41,11 @@ export function createApp(): Express {
   app.use(express.urlencoded({ extended: true, limit: '1mb' }));
   app.use(cookieParser());
 
-  // NoSQL injection protection (§32)
-  app.use(mongoSanitize());
+  // The NoSQL-injection sanitiser (§32) stripped `$`/`.` keys that Mongo would
+  // have interpreted as query operators. DynamoDB has no query language in the
+  // data path — every read is a typed Query/GetItem against named keys, and user
+  // input is bound as values, never parsed as an expression — so that class of
+  // injection no longer exists here. Zod still validates every request body.
 
   // Request id + structured logging (§72)
   app.use((req, _res, next) => {

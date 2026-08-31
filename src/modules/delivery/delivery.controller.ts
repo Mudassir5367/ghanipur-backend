@@ -3,7 +3,7 @@ import * as service from './delivery.service.js';
 import { asyncHandler, ok, created } from '../../utils/http.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { recordAudit } from '../../services/audit.service.js';
-import type { DeliveryStatus } from '../../models/delivery.model.js';
+import type { DeliveryStatus } from '../../repositories/dynamo/deliveryRepository.js';
 import type { TenantContext } from '../../types/context.js';
 
 function ctx(req: Request): TenantContext {
@@ -29,7 +29,7 @@ export const get = asyncHandler(async (req: Request, res: Response) => {
 
 export const create = asyncHandler(async (req: Request, res: Response) => {
   const delivery = await service.createDelivery(ctx(req), req.body, req.auth!.userId);
-  await recordAudit({ actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: ctx(req).shopId, action: 'DELIVERY_CREATE', resource: 'Delivery', resourceId: delivery._id.toString(), ip: req.ip });
+  await recordAudit({ actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: ctx(req).shopId, action: 'DELIVERY_CREATE', resource: 'Delivery', resourceId: delivery.id, ip: req.ip });
   created(res, { delivery });
 });
 

@@ -5,7 +5,7 @@ import { setRefreshCookie } from '../auth/cookie.js';
 import { asyncHandler, ok, created } from '../../utils/http.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { recordAudit } from '../../services/audit.service.js';
-import type { ShopStatus } from '../../models/shop.model.js';
+import type { ShopStatus } from '../../repositories/dynamo/shopRepository.js';
 
 function tenantShopId(req: Request): string {
   if (!req.tenant) throw ApiError.forbidden('Shop context required', 'NO_SHOP');

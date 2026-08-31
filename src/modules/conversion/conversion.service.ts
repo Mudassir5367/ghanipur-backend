@@ -1,10 +1,10 @@
-import { Product } from '../../models/product.model.js';
-import { Conversion } from '../../models/conversion.model.js';
+import * as productRepo from '../../repositories/dynamo/productRepository.js';
+import * as unitRepo from '../../repositories/dynamo/unitRepository.js';
+import { conversions } from '../../repositories/dynamo/miscRepositories.js';
 import { ApiError } from '../../utils/ApiError.js';
-import { withTransaction } from '../../utils/withTransaction.js';
-import { parsePagination } from '../../utils/pagination.js';
+import { parsePagination, paginateInMemory } from '../../utils/pagination.js';
 import { buildPageMeta } from '../../utils/http.js';
-import { recordMovement } from '../../services/inventory.service.js';
+import { recordMovement, undoMovements, type MovementResult } from '../../services/inventory.service.js';
 import { InventoryTxnType, RefType, CONVERSION_RATE } from '../../constants/inventory.js';
 import type { TenantContext } from '../../types/context.js';
 import type { CreateConversionInput } from './conversion.validators.js';
@@ -26,66 +26,85 @@ export function computeConversion(quantity: number, sourceUnitPriceMinor: number
 }
 
 /**
- * Convert stock from one product into another (Milk → Sweet Milk / Yogurt).
- * Atomically: consume the source quantity, produce the converted quantity, set the
- * target's selling price to the proportional value, and record the conversion.
+ * Convert stock from one product into another (Milk → Sweet Milk / Yogurt):
+ * consume the source, produce the converted quantity, reprice the target so total
+ * value is preserved, and record the conversion.
+ *
+ * This was one Mongo transaction. The source deduction is still stock-guarded, so
+ * you cannot convert more than you have; if any later step fails, both movements
+ * are unwound so stock is never left half-converted.
  */
 export async function createConversion(ctx: TenantContext, input: CreateConversionInput, userId: string) {
   const [source, target] = await Promise.all([
-    Product.findOne({ _id: input.sourceProductId, shopId: ctx.shopId, isDeleted: false }).populate('unitId', 'symbol'),
-    Product.findOne({ _id: input.targetProductId, shopId: ctx.shopId, isDeleted: false }),
+    productRepo.findById(ctx.shopId, input.sourceProductId),
+    productRepo.findById(ctx.shopId, input.targetProductId),
   ]);
   if (!source) throw ApiError.badRequest('Source product not found', 'SOURCE_NOT_FOUND');
   if (!target) throw ApiError.badRequest('Target product not found', 'TARGET_NOT_FOUND');
-  if (source.sellingPriceMinor <= 0) throw ApiError.badRequest('Source product has no price to convert from', 'SOURCE_NO_PRICE');
+  if (source.sellingPriceMinor <= 0) {
+    throw ApiError.badRequest('Source product has no price to convert from', 'SOURCE_NO_PRICE');
+  }
 
-  const { rate, convertedQuantity, convertedUnitPriceMinor, totalValueMinor } = computeConversion(input.quantity, source.sellingPriceMinor);
-  const unitSymbol = (source.unitId as unknown as { symbol?: string })?.symbol ?? '';
+  const { rate, convertedQuantity, convertedUnitPriceMinor, totalValueMinor } = computeConversion(
+    input.quantity,
+    source.sellingPriceMinor,
+  );
+  const unit = await unitRepo.findUsable(ctx.shopId, source.unitId);
+  const unitSymbol = unit?.symbol ?? '';
 
-  return withTransaction(async (session) => {
+  const undos: NonNullable<MovementResult['undo']>[] = [];
+  try {
     // Consume the source (stock-guarded: can't convert more than you have).
-    await recordMovement(
-      ctx,
-      { productId: source._id.toString(), type: InventoryTxnType.CONVERSION_OUT, quantity: input.quantity, refType: RefType.PRODUCT, refId: target._id, performedBy: userId, note: `Converted to ${target.name}` },
-      session,
-    );
-    // Produce the converted product.
-    await recordMovement(
-      ctx,
-      { productId: target._id.toString(), type: InventoryTxnType.CONVERSION_IN, quantity: convertedQuantity, refType: RefType.PRODUCT, refId: source._id, performedBy: userId, note: `Converted from ${source.name}` },
-      session,
-    );
-    // Keep the price consistent everywhere: the target now reflects the proportional price.
-    await Product.updateOne({ _id: target._id, shopId: ctx.shopId }, { sellingPriceMinor: convertedUnitPriceMinor }, { session });
+    const out = await recordMovement(ctx, {
+      productId: source.id,
+      type: InventoryTxnType.CONVERSION_OUT,
+      quantity: input.quantity,
+      refType: RefType.PRODUCT,
+      refId: target.id,
+      performedBy: userId,
+      note: `Converted to ${target.name}`,
+    });
+    if (out.undo) undos.push(out.undo);
 
-    const [conversion] = await Conversion.create(
-      [{
-        shopId: ctx.shopId,
-        sourceProductId: source._id,
-        sourceName: source.name,
-        targetProductId: target._id,
-        targetName: target.name,
-        unitSymbol,
-        rate,
-        sourceQuantity: input.quantity,
-        convertedQuantity,
-        sourceUnitPriceMinor: source.sellingPriceMinor,
-        convertedUnitPriceMinor,
-        totalValueMinor,
-        performedBy: userId,
-      }],
-      { session, ordered: true },
-    );
-    return conversion!;
-  });
+    // Produce the converted product.
+    const inMove = await recordMovement(ctx, {
+      productId: target.id,
+      type: InventoryTxnType.CONVERSION_IN,
+      quantity: convertedQuantity,
+      refType: RefType.PRODUCT,
+      refId: source.id,
+      performedBy: userId,
+      note: `Converted from ${source.name}`,
+    });
+    if (inMove.undo) undos.push(inMove.undo);
+
+    // Keep the price consistent everywhere: the target now reflects the proportional price.
+    await productRepo.update(ctx.shopId, target.id, { sellingPriceMinor: convertedUnitPriceMinor });
+
+    return await conversions.create({
+      shopId: ctx.shopId,
+      sourceProductId: source.id,
+      sourceName: source.name,
+      targetProductId: target.id,
+      targetName: target.name,
+      unitSymbol,
+      rate,
+      sourceQuantity: input.quantity,
+      convertedQuantity,
+      sourceUnitPriceMinor: source.sellingPriceMinor,
+      convertedUnitPriceMinor,
+      totalValueMinor,
+      performedBy: userId,
+    });
+  } catch (err) {
+    await undoMovements(ctx, undos);
+    throw err;
+  }
 }
 
 export async function listConversions(ctx: TenantContext, query: unknown) {
-  const { page, limit, skip } = parsePagination(query, '-createdAt');
-  const filter = { shopId: ctx.shopId };
-  const [data, total] = await Promise.all([
-    Conversion.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit),
-    Conversion.countDocuments(filter),
-  ]);
+  const { page, limit, skip, sort } = parsePagination(query, '-createdAt');
+  const rows = await conversions.listByShop(ctx.shopId);
+  const { data, total } = paginateInMemory(rows, { skip, limit, sort });
   return { data, meta: buildPageMeta(page, limit, total) };
 }

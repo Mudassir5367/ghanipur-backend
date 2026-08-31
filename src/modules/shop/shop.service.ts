@@ -1,4 +1,4 @@
-import { Category } from '../../models/category.model.js';
+import * as categoryRepo from '../../repositories/dynamo/categoryRepository.js';
 import * as shopRepo from '../../repositories/dynamo/shopRepository.js';
 import * as settingsRepo from '../../repositories/dynamo/shopSettingsRepository.js';
 import * as userRepo from '../../repositories/dynamo/userRepository.js';
@@ -24,10 +24,9 @@ export type ShopDoc = ShopRecord;
  *
  * The shop, its uniqueness guards and its settings row go in ONE DynamoDB
  * transaction, so a shop can never exist without settings or with a duplicate
- * slug. Starter categories are still in Mongo and therefore outside that
- * transaction; they are seeded best-effort, because a shop with no starter
- * categories is a cosmetic gap the owner can fix, not a corrupt shop. That
- * caveat disappears when Category moves.
+ * slug. Starter categories are seeded afterwards and best-effort: each carries
+ * its own slug guard, and a shop missing a starter category is a cosmetic gap
+ * the owner can fix, not a corrupt shop.
  */
 export async function provisionShop(
   _session: unknown,
@@ -54,9 +53,8 @@ export async function provisionShop(
 
   if (opts.seedCategories !== false) {
     try {
-      await Category.create(
+      await categoryRepo.createMany(
         DEFAULT_CATEGORIES.map((name, i) => ({ shopId: shop.id, name, slug: slugify(name), sortOrder: i })),
-        { ordered: true },
       );
     } catch (err) {
       logger.warn({ err, shopId: shop.id }, 'Starter categories not seeded; shop is usable without them');

@@ -15,7 +15,7 @@ export async function setup(_ctx: GlobalSetupContext): Promise<void> {
   process.env.NODE_ENV = 'test';
   process.env.JWT_ACCESS_SECRET = 'test-access-secret-0123456789abcdef';
   process.env.JWT_REFRESH_SECRET = 'test-refresh-secret-0123456789abcdef';
-  process.env.MONGO_URI = 'mongodb://localhost:27017/placeholder';
+  
   process.env.LOG_LEVEL = 'silent';
   process.env.DYNAMO_TABLE_PREFIX = process.env.DYNAMO_TABLE_PREFIX ?? 'ghanipur_test_';
   process.env.AWS_REGION = process.env.AWS_REGION ?? 'ap-south-1';

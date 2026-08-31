@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { objectId, imageUrl } from '../../utils/validators.js';
-import { CategoryStatus } from '../../models/category.model.js';
+import { CategoryStatus } from '../../repositories/dynamo/categoryRepository.js';
 
 export const createCategorySchema = z.object({
   name: z.string().trim().min(1).max(80),

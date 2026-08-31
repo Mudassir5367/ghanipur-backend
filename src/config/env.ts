@@ -9,9 +9,6 @@ const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(5000),
 
-  // Transitional: still required while Mongoose modules are being ported to
-  // DynamoDB (§ migration plan). Removed once the port is complete.
-  MONGO_URI: z.string().min(1, 'MONGO_URI is required'),
 
   // DynamoDB. No AWS_ACCESS_KEY_ID/SECRET in production — the EC2 instance role
   // is used instead (SDK default credential chain resolves it automatically).
@@ -20,10 +17,9 @@ const schema = z.object({
   AWS_SECRET_ACCESS_KEY: z.string().optional(),
   DYNAMO_ENDPOINT: z.string().url().optional(), // local dynamodb-local override
   DYNAMO_TABLE_PREFIX: z.string().default(''),  // e.g. "ghanipur_" for env isolation
-  // Nothing reads DynamoDB yet — the Mongo -> Dynamo port is unfinished, so every
-  // module still goes through Mongoose. An unreachable table therefore must not
-  // stop the server booting. Set 'true' once the port lands and the tables are
-  // genuinely required, to get the fail-fast behaviour back.
+  // DynamoDB is now the only datastore, so an unreachable table means the app
+  // cannot serve. Defaults to true; set 'false' only to let the process start
+  // for debugging when you expect the store to be down.
   DYNAMO_REQUIRED: z.preprocess((v) => (v === '' ? undefined : v), z.enum(['true', 'false']).optional()),
 
   JWT_ACCESS_SECRET: z.string().min(16, 'JWT_ACCESS_SECRET must be >=16 chars'),
@@ -102,7 +98,7 @@ export const env = {
   isDev: raw.NODE_ENV === 'development',
   cookieSecure,
   exposeOtp: raw.EXPOSE_OTP === 'true',
-  dynamoRequired: raw.DYNAMO_REQUIRED === 'true',
+  dynamoRequired: raw.DYNAMO_REQUIRED !== 'false', // DynamoDB is the only store now
   corsOrigins: raw.CORS_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean),
 } as const;
 

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { objectId, imageUrl } from '../../utils/validators.js';
-import { ProductStatus } from '../../models/product.model.js';
+import { ProductStatus } from '../../repositories/dynamo/productRepository.js';
 import { InventoryTxnType } from '../../constants/inventory.js';
 
 const money = z.number().min(0).max(100_000_000); // rupees

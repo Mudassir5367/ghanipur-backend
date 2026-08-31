@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { CustomerStatus } from '../../models/customer.model.js';
+import { CustomerStatus } from '../../repositories/dynamo/customerRepository.js';
 
 export const createCustomerSchema = z.object({
   name: z.string().trim().min(1).max(120),

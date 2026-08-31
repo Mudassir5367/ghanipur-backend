@@ -1,14 +1,13 @@
-import type { Types } from 'mongoose';
-import { AuditLog } from '../models/auditLog.model.js';
+import { auditLogs } from '../repositories/dynamo/miscRepositories.js';
 import { logger } from '../config/logger.js';
 
 export interface AuditInput {
-  actorId?: Types.ObjectId | string | null;
+  actorId?: string | null;
   actorRole?: string | null;
-  shopId?: Types.ObjectId | string | null;
+  shopId?: string | null;
   action: string;
   resource?: string | null;
-  resourceId?: Types.ObjectId | string | null;
+  resourceId?: string | null;
   ip?: string | null;
   metadata?: Record<string, unknown>;
 }
@@ -19,13 +18,13 @@ export interface AuditInput {
  */
 export async function recordAudit(input: AuditInput): Promise<void> {
   try {
-    await AuditLog.create({
-      actorId: input.actorId ?? null,
+    await auditLogs.append({
+      actorId: input.actorId ? String(input.actorId) : null,
       actorRole: input.actorRole ?? null,
-      shopId: input.shopId ?? null,
+      shopId: input.shopId ? String(input.shopId) : null,
       action: input.action,
       resource: input.resource ?? null,
-      resourceId: input.resourceId ?? null,
+      resourceId: input.resourceId ? String(input.resourceId) : null,
       ip: input.ip ?? null,
       metadata: input.metadata ?? {},
     });

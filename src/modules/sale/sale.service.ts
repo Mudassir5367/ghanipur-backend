@@ -1,14 +1,12 @@
-import { Sale } from '../../models/sale.model.js';
-import { SaleItem } from '../../models/saleItem.model.js';
-import { Product } from '../../models/product.model.js';
-import { Customer } from '../../models/customer.model.js';
+import * as saleRepo from '../../repositories/dynamo/saleRepository.js';
+import * as productRepo from '../../repositories/dynamo/productRepository.js';
+import * as customerRepo from '../../repositories/dynamo/customerRepository.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { toMinor } from '../../utils/money.js';
 import { generateCode } from '../../utils/code.js';
-import { parsePagination } from '../../utils/pagination.js';
+import { parsePagination, paginateInMemory } from '../../utils/pagination.js';
 import { buildPageMeta } from '../../utils/http.js';
-import { withTransaction } from '../../utils/withTransaction.js';
-import { recordMovement } from '../../services/inventory.service.js';
+import { recordMovement, undoMovements, type MovementResult } from '../../services/inventory.service.js';
 import { postLedgerEntry } from '../../services/ledger.service.js';
 import { InventoryTxnType, RefType } from '../../constants/inventory.js';
 import { SaleType, SaleStatus, LedgerEntryType, LedgerRefType } from '../../constants/sales.js';
@@ -18,29 +16,36 @@ import type { CreateSaleInput } from './sale.validators.js';
 interface PreparedItem {
   productId: string;
   name: string;
-  unitId: unknown;
+  unitId: string;
   quantity: number;
   unitPriceMinor: number;
   lineTotalMinor: number;
 }
 
 /**
- * Create a sale atomically (§48). One transaction covers: Sale + SaleItems +
- * inventory deduction (per item, concurrency-safe) + — for credit — the customer
- * ledger debit and balance update. Any failure (e.g. insufficient stock) rolls
- * the whole thing back, so books and stock never partially update.
+ * Create a sale, all-or-nothing (§48).
+ *
+ * Mongo wrapped Sale + SaleItems + per-item stock deduction + the customer
+ * ledger debit in one transaction. DynamoDB cannot span those tables with
+ * conditional stock decrements, so atomicity is reconstructed explicitly: each
+ * stock deduction hands back an undo handle, and any failure — most commonly one
+ * item lacking stock — unwinds every movement already applied, deletes the sale
+ * items and removes the sale (releasing its code guard). The observable
+ * behaviour is unchanged: books and stock never partially update.
+ *
+ * The per-item deduction itself is still atomic and guarded, so two concurrent
+ * sales cannot both take the last unit.
  */
 export async function createSale(ctx: TenantContext, input: CreateSaleInput, userId: string) {
   // Customer is optional (both cash and credit). Validate it only when supplied.
   if (input.customerId) {
-    const customer = await Customer.findOne({ _id: input.customerId, shopId: ctx.shopId, isDeleted: false });
+    const customer = await customerRepo.findById(ctx.shopId, input.customerId);
     if (!customer) throw ApiError.badRequest('Customer not found', 'CUSTOMER_NOT_FOUND');
   }
 
   // Load products (shop-scoped) and snapshot price/name/unit.
-  const productIds = input.items.map((i) => i.productId);
-  const products = await Product.find({ _id: { $in: productIds }, shopId: ctx.shopId, isDeleted: false });
-  const byId = new Map(products.map((p) => [p._id.toString(), p]));
+  const products = await Promise.all(input.items.map((i) => productRepo.findById(ctx.shopId, i.productId)));
+  const byId = new Map(products.filter((p) => p !== null).map((p) => [p.id, p]));
 
   const prepared: PreparedItem[] = input.items.map((item) => {
     const product = byId.get(item.productId);
@@ -54,7 +59,9 @@ export async function createSale(ctx: TenantContext, input: CreateSaleInput, use
       // Amount-based sale: the customer pays exactly this amount; the quantity to
       // deduct is derived from it. Line total is the amount itself (kept exact),
       // quantity is rounded to 3 dp for a clean inventory movement.
-      if (unitPriceMinor <= 0) throw ApiError.badRequest(`Cannot sell ${product.name} by amount — it has no unit price`, 'PRODUCT_NO_PRICE');
+      if (unitPriceMinor <= 0) {
+        throw ApiError.badRequest(`Cannot sell ${product.name} by amount — it has no unit price`, 'PRODUCT_NO_PRICE');
+      }
       lineTotalMinor = toMinor(item.amount);
       quantity = Math.round((lineTotalMinor / unitPriceMinor) * 1000) / 1000;
     } else {
@@ -67,95 +74,127 @@ export async function createSale(ctx: TenantContext, input: CreateSaleInput, use
   const subtotalMinor = prepared.reduce((s, i) => s + i.lineTotalMinor, 0);
   const totalMinor = subtotalMinor; // tax handled per-product later (§7)
 
-  return withTransaction(async (session) => {
-    const [sale] = await Sale.create(
-      [{
-        shopId: ctx.shopId,
-        code: generateCode('SALE'),
-        customerId: input.customerId ?? null,
-        customerPhone: input.customerPhone ?? '',
-        type: input.type,
-        status: SaleStatus.COMPLETED,
-        subtotalMinor,
-        taxMinor: 0,
-        totalMinor,
-        paidMinor: input.type === SaleType.CASH ? totalMinor : 0,
-        dueMinor: input.type === SaleType.CASH ? 0 : totalMinor,
-        paymentMethod: input.type === SaleType.CASH ? (input.paymentMethod ?? 'CASH') : null,
-        note: input.note ?? '',
-        soldBy: userId,
-      }],
-      { session },
-    );
-    const saleId = sale!._id;
+  const sale = await saleRepo.create({
+    shopId: ctx.shopId,
+    code: generateCode('SALE'),
+    customerId: input.customerId ?? null,
+    customerPhone: input.customerPhone ?? '',
+    type: input.type,
+    status: SaleStatus.COMPLETED,
+    subtotalMinor,
+    taxMinor: 0,
+    totalMinor,
+    paidMinor: input.type === SaleType.CASH ? totalMinor : 0,
+    dueMinor: input.type === SaleType.CASH ? 0 : totalMinor,
+    paymentMethod: input.type === SaleType.CASH ? (input.paymentMethod ?? 'CASH') : null,
+    note: input.note ?? '',
+    soldBy: userId,
+  });
 
-    await SaleItem.create(
-      prepared.map((i) => ({ shopId: ctx.shopId, saleId, productId: i.productId, name: i.name, quantity: i.quantity, unitId: i.unitId, unitPriceMinor: i.unitPriceMinor, lineTotalMinor: i.lineTotalMinor })),
-      // `ordered: true` is required by Mongoose when creating multiple docs in a session.
-      { session, ordered: true },
-    );
+  const undos: NonNullable<MovementResult['undo']>[] = [];
+  try {
+    for (const item of prepared) {
+      await saleRepo.addItem({
+        shopId: ctx.shopId,
+        saleId: sale.id,
+        productId: item.productId,
+        name: item.name,
+        quantity: item.quantity,
+        unitId: item.unitId,
+        unitPriceMinor: item.unitPriceMinor,
+        lineTotalMinor: item.lineTotalMinor,
+      });
+    }
 
     // Deduct stock for each line (atomic + guarded inside recordMovement).
     for (const item of prepared) {
-      await recordMovement(
-        ctx,
-        { productId: item.productId, type: InventoryTxnType.SALE, quantity: item.quantity, refType: RefType.SALE, refId: saleId, performedBy: userId, note: `Sale ${sale!.code}` },
-        session,
-      );
+      const moved = await recordMovement(ctx, {
+        productId: item.productId,
+        type: InventoryTxnType.SALE,
+        quantity: item.quantity,
+        refType: RefType.SALE,
+        refId: sale.id,
+        performedBy: userId,
+        note: `Sale ${sale.code}`,
+      });
+      if (moved.undo) undos.push(moved.undo);
     }
 
     // Credit sale with a named customer => post the debit to their ledger. A credit
     // sale without a customer keeps its due on the sale record only (unassigned).
     if (input.type === SaleType.CREDIT && input.customerId) {
-      await postLedgerEntry(
-        ctx,
-        { customerId: input.customerId, entryType: LedgerEntryType.CREDIT_SALE, debitMinor: totalMinor, refType: LedgerRefType.SALE, refId: saleId, note: `Sale ${sale!.code}`, createdBy: userId },
-        session,
-      );
+      await postLedgerEntry(ctx, {
+        customerId: input.customerId,
+        entryType: LedgerEntryType.CREDIT_SALE,
+        debitMinor: totalMinor,
+        refType: LedgerRefType.SALE,
+        refId: sale.id,
+        note: `Sale ${sale.code}`,
+        createdBy: userId,
+      });
     } else if (input.customerId) {
-      await Customer.updateOne({ _id: input.customerId, shopId: ctx.shopId }, { lastSaleAt: new Date() }, { session });
+      await customerRepo.touchLastSale(ctx.shopId, input.customerId);
     }
+  } catch (err) {
+    // Roll the whole sale back: restore stock, drop the movements, remove the
+    // items and the sale itself (which frees its code).
+    await undoMovements(ctx, undos);
+    await saleRepo.deleteItems(sale.id).catch(() => undefined);
+    await saleRepo.hardDelete(sale).catch(() => undefined);
+    throw err;
+  }
 
-    return sale!;
+  return sale;
+}
+
+/** Attaches customer name/phone, which used to come from a Mongoose populate. */
+async function attachCustomers<T extends { customerId: string | null }>(ctx: TenantContext, rows: T[]) {
+  const ids = [...new Set(rows.map((r) => r.customerId).filter((v): v is string => !!v))];
+  const customers = await Promise.all(ids.map((id) => customerRepo.findById(ctx.shopId, id)));
+  const byId = new Map(customers.filter((c) => c !== null).map((c) => [c.id, c]));
+  return rows.map((r) => {
+    const c = r.customerId ? byId.get(r.customerId) : undefined;
+    return { ...r, customerId: c ? { _id: c.id, name: c.name, phone: c.phone } : r.customerId };
   });
 }
 
-export async function listSales(ctx: TenantContext, query: unknown, filters: { type?: string; status?: string; customerId?: string; from?: string; to?: string }) {
+export async function listSales(
+  ctx: TenantContext,
+  query: unknown,
+  filters: { type?: string; status?: string; customerId?: string; from?: string; to?: string },
+) {
   const { page, limit, skip, sort } = parsePagination(query, '-soldAt');
-  const filter: Record<string, unknown> = { shopId: ctx.shopId };
-  if (filters.type) filter.type = filters.type;
-  if (filters.status) filter.status = filters.status;
-  if (filters.customerId) filter.customerId = filters.customerId;
+  let rows = filters.customerId
+    ? await saleRepo.listByCustomer(ctx.shopId, filters.customerId)
+    : await saleRepo.listByShop(ctx.shopId);
+
+  if (filters.type) rows = rows.filter((s) => s.type === filters.type);
+  if (filters.status) rows = rows.filter((s) => s.status === filters.status);
   if (filters.from || filters.to) {
-    filter.soldAt = {} as Record<string, Date>;
-    if (filters.from) (filter.soldAt as Record<string, Date>).$gte = new Date(filters.from);
-    if (filters.to) (filter.soldAt as Record<string, Date>).$lte = new Date(filters.to);
+    const from = filters.from ? new Date(filters.from).getTime() : -Infinity;
+    const to = filters.to ? new Date(filters.to).getTime() : Infinity;
+    rows = rows.filter((s) => {
+      const t = new Date(s.soldAt).getTime();
+      return t >= from && t <= to;
+    });
   }
-  const [sales, total] = await Promise.all([
-    Sale.find(filter).sort(sort).skip(skip).limit(limit).populate('customerId', 'name phone'),
-    Sale.countDocuments(filter),
-  ]);
 
-  // Attach line items (product name + unit price + qty) so the list can show what
-  // was actually sold, not just totals.
-  const items = await SaleItem.find({ shopId: ctx.shopId, saleId: { $in: sales.map((s) => s._id) } })
-    .select('saleId name quantity unitPriceMinor lineTotalMinor')
-    .lean();
-  const bySale = new Map<string, typeof items>();
-  for (const it of items) {
-    const key = it.saleId.toString();
-    (bySale.get(key) ?? bySale.set(key, []).get(key)!).push(it);
-  }
-  const data = sales.map((s) => ({ ...s.toObject(), items: bySale.get(s._id.toString()) ?? [] }));
+  const { data, total } = paginateInMemory(rows, { skip, limit, sort });
 
-  return { data, meta: buildPageMeta(page, limit, total) };
+  // Attach line items so the list shows what was sold, not just totals.
+  const itemsPerSale = await Promise.all(data.map((s) => saleRepo.listItems(s.id)));
+  const withCustomers = await attachCustomers(ctx, data);
+  const withItems = withCustomers.map((s, i) => ({ ...s, items: itemsPerSale[i] ?? [] }));
+
+  return { data: withItems, meta: buildPageMeta(page, limit, total) };
 }
 
 export async function getSale(ctx: TenantContext, id: string) {
-  const sale = await Sale.findOne({ _id: id, shopId: ctx.shopId }).populate('customerId', 'name phone');
-  if (!sale) throw ApiError.notFound('Sale not found', 'SALE_NOT_FOUND');
-  const items = await SaleItem.find({ shopId: ctx.shopId, saleId: id });
-  return { sale, items };
+  const found = await saleRepo.findScoped(ctx.shopId, id);
+  if (!found) throw ApiError.notFound('Sale not found', 'SALE_NOT_FOUND');
+  const [sale] = await attachCustomers(ctx, [found]);
+  const items = await saleRepo.listItems(id);
+  return { sale: sale!, items };
 }
 
 /**
@@ -163,32 +202,38 @@ export async function getSale(ctx: TenantContext, id: string) {
  * and mark the sale CANCELLED — never delete/edit the original record.
  */
 export async function reverseSale(ctx: TenantContext, id: string, userId: string) {
-  const sale = await Sale.findOne({ _id: id, shopId: ctx.shopId });
+  const sale = await saleRepo.findScoped(ctx.shopId, id);
   if (!sale) throw ApiError.notFound('Sale not found', 'SALE_NOT_FOUND');
   if (sale.status === SaleStatus.CANCELLED) throw ApiError.conflict('Sale already reversed', 'SALE_ALREADY_REVERSED');
 
-  const items = await SaleItem.find({ shopId: ctx.shopId, saleId: id });
+  const items = await saleRepo.listItems(id);
 
-  return withTransaction(async (session) => {
-    for (const item of items) {
-      await recordMovement(
-        ctx,
-        { productId: item.productId.toString(), type: InventoryTxnType.RETURN, quantity: item.quantity, refType: RefType.SALE, refId: sale._id, performedBy: userId, note: `Reversal of ${sale.code}` },
-        session,
-      );
-    }
+  for (const item of items) {
+    await recordMovement(ctx, {
+      productId: item.productId,
+      type: InventoryTxnType.RETURN,
+      quantity: item.quantity,
+      refType: RefType.SALE,
+      refId: sale.id,
+      performedBy: userId,
+      note: `Reversal of ${sale.code}`,
+    });
+  }
 
-    if (sale.type === SaleType.CREDIT && sale.customerId) {
-      await postLedgerEntry(
-        ctx,
-        { customerId: sale.customerId.toString(), entryType: LedgerEntryType.REVERSAL, creditMinor: sale.totalMinor, refType: LedgerRefType.SALE, refId: sale._id, note: `Reversal of ${sale.code}`, createdBy: userId },
-        session,
-      );
-    }
+  if (sale.type === SaleType.CREDIT && sale.customerId) {
+    await postLedgerEntry(ctx, {
+      customerId: sale.customerId,
+      entryType: LedgerEntryType.REVERSAL,
+      creditMinor: sale.totalMinor,
+      refType: LedgerRefType.SALE,
+      refId: sale.id,
+      note: `Reversal of ${sale.code}`,
+      createdBy: userId,
+    });
+  }
 
-    sale.status = SaleStatus.CANCELLED;
-    sale.cancelledAt = new Date();
-    await sale.save({ session });
-    return sale;
+  return saleRepo.update(ctx.shopId, sale, {
+    status: SaleStatus.CANCELLED,
+    cancelledAt: new Date().toISOString(),
   });
 }

@@ -28,7 +28,7 @@ export const get = asyncHandler(async (req: Request, res: Response) => {
 
 export const create = asyncHandler(async (req: Request, res: Response) => {
   const sale = await service.createSale(ctx(req), req.body, req.auth!.userId);
-  await recordAudit({ actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: ctx(req).shopId, action: 'SALE_CREATE', resource: 'Sale', resourceId: sale._id.toString(), ip: req.ip, metadata: { type: sale.type, totalMinor: sale.totalMinor } });
+  await recordAudit({ actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: ctx(req).shopId, action: 'SALE_CREATE', resource: 'Sale', resourceId: sale.id, ip: req.ip, metadata: { type: sale.type, totalMinor: sale.totalMinor } });
   created(res, { sale });
 });
 

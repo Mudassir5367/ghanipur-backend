@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
-import mongoose from 'mongoose';
+import { UniqueConstraintError } from '../repositories/dynamo/base.js';
 import { ApiError } from '../utils/ApiError.js';
 import { env } from '../config/env.js';
 import { logger } from '../config/logger.js';
@@ -11,17 +11,21 @@ export function notFound(req: Request, _res: Response, next: NextFunction): void
 function normalize(err: unknown): ApiError {
   if (err instanceof ApiError) return err;
 
-  // Mongo duplicate key
-  if (err && typeof err === 'object' && 'code' in err && (err as { code: number }).code === 11000) {
-    const key = Object.keys((err as { keyValue?: Record<string, unknown> }).keyValue ?? {})[0] ?? 'field';
-    return ApiError.conflict(`Duplicate value for ${key}`, 'DUPLICATE_KEY');
+  // A uniqueness guard rejected the write — the DynamoDB equivalent of Mongo's
+  // duplicate-key error, kept on the same DUPLICATE_KEY code so clients that
+  // already handle it keep working.
+  if (err instanceof UniqueConstraintError) {
+    return ApiError.conflict(`Duplicate value for ${err.field}`, 'DUPLICATE_KEY');
   }
-  if (err instanceof mongoose.Error.ValidationError) {
-    const errors = Object.values(err.errors).map((e) => ({ path: e.path, message: e.message }));
-    return ApiError.badRequest('Validation failed', 'VALIDATION_ERROR', errors);
+
+  // A conditional write that lost a race (e.g. two payments on one delivery).
+  if (err && typeof err === 'object' && (err as { name?: string }).name === 'ConditionalCheckFailedException') {
+    return ApiError.conflict('The record changed while you were editing it. Please retry.', 'CONFLICT');
   }
-  if (err instanceof mongoose.Error.CastError) {
-    return ApiError.badRequest(`Invalid ${err.path}`, 'INVALID_ID');
+
+  // DynamoDB rejects a malformed key before it reaches our validators.
+  if (err && typeof err === 'object' && (err as { name?: string }).name === 'ValidationException') {
+    return ApiError.badRequest('Invalid request for this record', 'INVALID_ID');
   }
 
   const message = err instanceof Error ? err.message : 'Internal server error';

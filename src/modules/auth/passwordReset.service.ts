@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import * as userRepo from '../../repositories/dynamo/userRepository.js';
-import { PasswordReset } from '../../models/passwordReset.model.js';
+import { passwordResets } from '../../repositories/dynamo/miscRepositories.js';
 import { hashPassword, hashToken, verifyTokenHash } from '../../services/token.service.js';
 import { sendOtpEmail } from '../../services/mailer.service.js';
 import { ApiError } from '../../utils/ApiError.js';
@@ -15,6 +15,10 @@ const genResetToken = () => crypto.randomBytes(32).toString('hex');
  * the email exists (anti-enumeration); the caller returns one generic message. A
  * code is only generated/sent for a real, active account, and only if the resend
  * cooldown has elapsed. Returns the OTP only when EXPOSE_OTP is on (local testing).
+ *
+ * One row per email, keyed on the address itself, so "one active reset per email"
+ * is the primary key rather than a unique index. Rows self-expire through
+ * DynamoDB's native TTL, replacing the Mongo TTL index.
  */
 export async function requestPasswordReset(emailRaw: string): Promise<{ devOtp?: string }> {
   const email = normalize(emailRaw);
@@ -22,25 +26,24 @@ export async function requestPasswordReset(emailRaw: string): Promise<{ devOtp?:
   if (!user || !user.isActive) return {}; // stay silent — do not reveal (non-)existence
 
   // Resend cooldown: if a live (unverified) code was sent very recently, don't resend.
-  const existing = await PasswordReset.findOne({ email, verifiedAt: null });
-  if (existing && Date.now() - existing.lastSentAt.getTime() < env.OTP_RESEND_COOLDOWN_SEC * 1000) {
+  const existing = await passwordResets.find(email);
+  if (
+    existing &&
+    !existing.verifiedAt &&
+    Date.now() - new Date(existing.lastSentAt).getTime() < env.OTP_RESEND_COOLDOWN_SEC * 1000
+  ) {
     return {};
   }
 
   const otp = genOtp();
-  await PasswordReset.findOneAndUpdate(
-    { email },
-    {
-      email,
-      otpHash: await hashToken(otp),
-      resetTokenHash: null,
-      verifiedAt: null,
-      attempts: 0,
-      expiresAt: new Date(Date.now() + env.OTP_TTL_MIN * 60_000),
-      lastSentAt: new Date(),
-    },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
-  );
+  await passwordResets.upsert(email, {
+    otpHash: await hashToken(otp),
+    resetTokenHash: null,
+    verifiedAt: null,
+    attempts: 0,
+    expiresAt: new Date(Date.now() + env.OTP_TTL_MIN * 60_000).toISOString(),
+    lastSentAt: new Date().toISOString(),
+  });
 
   // Local/dev (EXPOSE_OTP=true): surface the code in the response and skip email.
   // Live (EXPOSE_OTP unset/false): send the real email, never expose the code.
@@ -56,29 +59,39 @@ export async function requestPasswordReset(emailRaw: string): Promise<{ devOtp?:
  */
 export async function verifyOtp(emailRaw: string, otp: string): Promise<{ resetToken: string }> {
   const email = normalize(emailRaw);
-  const pr = await PasswordReset.findOne({ email });
+  const pr = await passwordResets.find(email);
   const invalid = ApiError.badRequest('Invalid or expired code. Please request a new one.', 'OTP_INVALID');
 
   // Same generic error whether there's no request, it's expired, or already used —
   // never leak which. (Distinct code only for the "attempts left" nudge below.)
   if (!pr || pr.verifiedAt) throw invalid;
-  if (pr.expiresAt.getTime() < Date.now()) { await pr.deleteOne(); throw invalid; }
-  if (pr.attempts >= env.OTP_MAX_ATTEMPTS) { await pr.deleteOne(); throw ApiError.badRequest('Too many incorrect attempts. Please request a new code.', 'OTP_LOCKED'); }
+  if (new Date(pr.expiresAt).getTime() < Date.now()) {
+    await passwordResets.remove(email);
+    throw invalid;
+  }
+  if (pr.attempts >= env.OTP_MAX_ATTEMPTS) {
+    await passwordResets.remove(email);
+    throw ApiError.badRequest('Too many incorrect attempts. Please request a new code.', 'OTP_LOCKED');
+  }
 
   const ok = await verifyTokenHash(pr.otpHash, otp);
   if (!ok) {
-    pr.attempts += 1;
-    const left = env.OTP_MAX_ATTEMPTS - pr.attempts;
-    if (left <= 0) { await pr.deleteOne(); throw ApiError.badRequest('Too many incorrect attempts. Please request a new code.', 'OTP_LOCKED'); }
-    await pr.save();
+    const attempts = pr.attempts + 1;
+    const left = env.OTP_MAX_ATTEMPTS - attempts;
+    if (left <= 0) {
+      await passwordResets.remove(email);
+      throw ApiError.badRequest('Too many incorrect attempts. Please request a new code.', 'OTP_LOCKED');
+    }
+    await passwordResets.patch(email, { attempts });
     throw ApiError.badRequest(`Incorrect code. ${left} attempt${left === 1 ? '' : 's'} left.`, 'OTP_INCORRECT');
   }
 
   const resetToken = genResetToken();
-  pr.resetTokenHash = await hashToken(resetToken);
-  pr.verifiedAt = new Date(); // OTP is now consumed — cannot be verified again
-  pr.expiresAt = new Date(Date.now() + env.RESET_TOKEN_TTL_MIN * 60_000); // window to set the new password
-  await pr.save();
+  await passwordResets.patch(email, {
+    resetTokenHash: await hashToken(resetToken),
+    verifiedAt: new Date().toISOString(), // OTP is now consumed — cannot be verified again
+    expiresAt: new Date(Date.now() + env.RESET_TOKEN_TTL_MIN * 60_000).toISOString(), // window to set the new password
+  });
   return { resetToken };
 }
 
@@ -89,21 +102,27 @@ export async function verifyOtp(emailRaw: string, otp: string): Promise<{ resetT
  */
 export async function resetPassword(emailRaw: string, resetToken: string, newPassword: string): Promise<void> {
   const email = normalize(emailRaw);
-  const pr = await PasswordReset.findOne({ email, verifiedAt: { $ne: null } });
+  const pr = await passwordResets.find(email);
   const invalid = ApiError.badRequest('Reset session is invalid or has expired. Please start again.', 'RESET_INVALID');
-  if (!pr || !pr.resetTokenHash) throw invalid;
-  if (pr.expiresAt.getTime() < Date.now()) { await pr.deleteOne(); throw invalid; }
+  if (!pr || !pr.verifiedAt || !pr.resetTokenHash) throw invalid;
+  if (new Date(pr.expiresAt).getTime() < Date.now()) {
+    await passwordResets.remove(email);
+    throw invalid;
+  }
 
   const ok = await verifyTokenHash(pr.resetTokenHash, resetToken);
   if (!ok) throw invalid;
 
   const user = await userRepo.findByEmail(email);
-  if (!user) { await pr.deleteOne(); throw invalid; }
+  if (!user) {
+    await passwordResets.remove(email);
+    throw invalid;
+  }
 
   await userRepo.update(user.id, {
     passwordHash: await hashPassword(newPassword),
     refreshTokenHash: null, // revoke every existing session after a password change
   });
 
-  await pr.deleteOne(); // single-use: the reset token/OTP can never be reused
+  await passwordResets.remove(email); // single-use: the reset token/OTP can never be reused
 }

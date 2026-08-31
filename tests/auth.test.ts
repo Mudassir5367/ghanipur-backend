@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../src/app.js';
-import { User } from '../src/models/user.model.js';
+import * as userRepo from '../src/repositories/dynamo/userRepository.js';
 
 const app = createApp();
 
@@ -23,7 +23,7 @@ describe('Auth — public user signup', () => {
     expect(res.body.data.user.permissions).toHaveLength(0); // no shop permissions
 
     // Password never stored plainly or returned.
-    const user = await User.findOne({ email: validUser.email }).select('+passwordHash');
+    const user = await userRepo.findByEmail(validUser.email);
     expect(user?.passwordHash).not.toBe(validUser.password);
     expect(res.body.data.user.passwordHash).toBeUndefined();
   });

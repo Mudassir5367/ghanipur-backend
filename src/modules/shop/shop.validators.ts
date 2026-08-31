@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ShopStatus } from '../../models/shop.model.js';
+import { ShopStatus } from '../../repositories/dynamo/shopRepository.js';
 import { imageUrl } from '../../utils/validators.js';
 
 const geoSchema = z.object({ lat: z.number(), lng: z.number() }).partial();

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { objectId } from '../../utils/validators.js';
-import { DeliveryStatus, PaymentType } from '../../models/delivery.model.js';
+import { DeliveryStatus, PaymentType } from '../../repositories/dynamo/deliveryRepository.js';
 
 const money = z.number().min(0).max(100_000_000); // rupees
 

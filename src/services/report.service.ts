@@ -1,18 +1,31 @@
-import { Types } from 'mongoose';
-import { Sale } from '../models/sale.model.js';
-import { SaleItem } from '../models/saleItem.model.js';
-import { Payment } from '../models/payment.model.js';
-import { Customer } from '../models/customer.model.js';
-import { Product } from '../models/product.model.js';
-import { Delivery, DeliveryStatus } from '../models/delivery.model.js';
-import { InventoryTransaction } from '../models/inventoryTransaction.model.js';
+import * as saleRepo from '../repositories/dynamo/saleRepository.js';
+import * as paymentRepo from '../repositories/dynamo/paymentRepository.js';
+import * as customerRepo from '../repositories/dynamo/customerRepository.js';
+import * as productRepo from '../repositories/dynamo/productRepository.js';
+import * as unitRepo from '../repositories/dynamo/unitRepository.js';
+import * as deliveryRepo from '../repositories/dynamo/deliveryRepository.js';
+import * as txnRepo from '../repositories/dynamo/inventoryTransactionRepository.js';
 import * as shopRepo from '../repositories/dynamo/shopRepository.js';
+import { DeliveryStatus } from '../repositories/dynamo/deliveryRepository.js';
 import { SaleType, SaleStatus } from '../constants/sales.js';
 import { InventoryTxnType } from '../constants/inventory.js';
 import { dayRange, monthRange, namedRange, type DateRange } from '../utils/dateRange.js';
 import type { TenantContext } from '../types/context.js';
 
-const oid = (id: string) => new Types.ObjectId(id);
+/**
+ * Reporting over DynamoDB.
+ *
+ * Mongo did this with aggregation pipelines ($group, $lookup, $unwind).
+ * DynamoDB has none of that, so each report Queries the shop's partitions and
+ * computes in memory. Every read is shop-scoped by partition key, so the cost is
+ * proportional to one tenant's data rather than the whole table — the same
+ * property that makes the list endpoints affordable.
+ */
+
+const inRange = (at: string | Date, range: DateRange): boolean => {
+  const t = new Date(at).getTime();
+  return t >= range.start.getTime() && t <= range.end.getTime();
+};
 
 async function shopTimezone(shopId: string): Promise<string> {
   const shop = await shopRepo.findById(shopId);
@@ -21,47 +34,44 @@ async function shopTimezone(shopId: string): Promise<string> {
 
 /** Sales totals split by cash/credit for a range. */
 async function salesTotals(shopId: string, range: DateRange) {
-  const rows = await Sale.aggregate<{ _id: string; total: number; count: number }>([
-    { $match: { shopId: oid(shopId), status: SaleStatus.COMPLETED, soldAt: { $gte: range.start, $lte: range.end } } },
-    { $group: { _id: '$type', total: { $sum: '$totalMinor' }, count: { $sum: 1 } } },
-  ]);
-  const cash = rows.find((r) => r._id === SaleType.CASH);
-  const credit = rows.find((r) => r._id === SaleType.CREDIT);
-  return {
-    cashMinor: cash?.total ?? 0,
-    creditMinor: credit?.total ?? 0,
-    totalMinor: (cash?.total ?? 0) + (credit?.total ?? 0),
-    count: (cash?.count ?? 0) + (credit?.count ?? 0),
-  };
+  const sales = (await saleRepo.listByShop(shopId)).filter(
+    (s) => s.status === SaleStatus.COMPLETED && inRange(s.soldAt, range),
+  );
+  const sum = (type: SaleType) =>
+    sales.filter((s) => s.type === type).reduce((acc, s) => acc + s.totalMinor, 0);
+  const cashMinor = sum(SaleType.CASH);
+  const creditMinor = sum(SaleType.CREDIT);
+  return { cashMinor, creditMinor, totalMinor: cashMinor + creditMinor, count: sales.length };
 }
 
 /**
  * All money actually received in the range, across every channel — otherwise the
  * figure is misleading. Three sources, none overlapping:
  *  1. Cash sales — paid in full at the counter (Sale.paidMinor).
- *  2. Standalone customer payments against the credit ledger (Payment docs).
- *  3. Delivery payments — stored embedded on the delivery, NOT in Payment (this was
- *     silently omitted before, so delivery collections never showed up).
+ *  2. Standalone customer payments against the credit ledger.
+ *  3. Delivery payments — stored embedded on the delivery, NOT as Payment rows.
  */
 async function paymentsTotal(shopId: string, range: DateRange): Promise<number> {
-  const inRange = { $gte: range.start, $lte: range.end };
-  const [cashSales, standalone, deliveryPays] = await Promise.all([
-    Sale.aggregate<{ total: number }>([
-      { $match: { shopId: oid(shopId), status: SaleStatus.COMPLETED, type: SaleType.CASH, soldAt: inRange } },
-      { $group: { _id: null, total: { $sum: '$paidMinor' } } },
-    ]),
-    Payment.aggregate<{ total: number }>([
-      { $match: { shopId: oid(shopId), reversedAt: null, receivedAt: inRange } },
-      { $group: { _id: null, total: { $sum: '$amountMinor' } } },
-    ]),
-    Delivery.aggregate<{ total: number }>([
-      { $match: { shopId: oid(shopId) } },
-      { $unwind: '$payments' },
-      { $match: { 'payments.receivedAt': inRange } },
-      { $group: { _id: null, total: { $sum: '$payments.amountMinor' } } },
-    ]),
+  const [sales, payments, deliveries] = await Promise.all([
+    saleRepo.listByShop(shopId),
+    paymentRepo.listByShop(shopId),
+    deliveryRepo.listByShop(shopId),
   ]);
-  return (cashSales[0]?.total ?? 0) + (standalone[0]?.total ?? 0) + (deliveryPays[0]?.total ?? 0);
+
+  const cashSales = sales
+    .filter((s) => s.status === SaleStatus.COMPLETED && s.type === SaleType.CASH && inRange(s.soldAt, range))
+    .reduce((acc, s) => acc + s.paidMinor, 0);
+
+  const standalone = payments
+    .filter((p) => !p.reversedAt && inRange(p.receivedAt, range))
+    .reduce((acc, p) => acc + p.amountMinor, 0);
+
+  const deliveryPays = deliveries
+    .flatMap((d) => d.payments)
+    .filter((p) => inRange(p.receivedAt, range))
+    .reduce((acc, p) => acc + p.amountMinor, 0);
+
+  return cashSales + standalone + deliveryPays;
 }
 
 /**
@@ -73,61 +83,86 @@ async function paymentsTotal(shopId: string, range: DateRange): Promise<number> 
  * with the sum of the customer rows. Their due still shows on the Sales list.
  */
 async function outstandingTotal(shopId: string): Promise<number> {
-  const [ledger, deliveries] = await Promise.all([
-    Customer.aggregate<{ total: number }>([
-      { $match: { shopId: oid(shopId), isDeleted: false, currentBalanceMinor: { $gt: 0 } } },
-      { $group: { _id: null, total: { $sum: '$currentBalanceMinor' } } },
-    ]),
-    Delivery.aggregate<{ total: number }>([
-      { $match: { shopId: oid(shopId), status: { $ne: DeliveryStatus.CANCELLED }, remainingMinor: { $gt: 0 } } },
-      // Only count dues that belong to a real, non-deleted customer — a delivery
-      // with no (or a removed) customer is owed by nobody and never appears on the
-      // Customers page, so counting it here would make the two totals disagree.
-      { $lookup: { from: 'customers', localField: 'customerId', foreignField: '_id', as: 'cust' } },
-      { $unwind: '$cust' },
-      { $match: { 'cust.isDeleted': false } },
-      { $group: { _id: null, total: { $sum: '$remainingMinor' } } },
-    ]),
+  const [customers, deliveries] = await Promise.all([
+    customerRepo.listByShop(shopId),
+    deliveryRepo.listByShop(shopId),
   ]);
-  return (ledger[0]?.total ?? 0) + (deliveries[0]?.total ?? 0);
+  const liveCustomerIds = new Set(customers.map((c) => c.id));
+
+  const ledger = customers
+    .filter((c) => c.currentBalanceMinor > 0)
+    .reduce((acc, c) => acc + c.currentBalanceMinor, 0);
+
+  // Only dues belonging to a real, non-deleted customer — a delivery with no (or a
+  // removed) customer is owed by nobody and never appears on the Customers page.
+  const deliveryDues = deliveries
+    .filter((d) => d.status !== DeliveryStatus.CANCELLED && d.remainingMinor > 0)
+    .filter((d) => d.customerId && liveCustomerIds.has(d.customerId))
+    .reduce((acc, d) => acc + d.remainingMinor, 0);
+
+  return ledger + deliveryDues;
 }
 
-/** Product-wise sold quantity + revenue for a range. Combines counter/credit
- *  sales (SaleItem) with deliveries (goods leave on delivery too), merged per
- *  product, so quantities can be reported per measurement unit. */
-async function productSales(shopId: string, range: DateRange) {
-  type Row = { _id: Types.ObjectId; name: string; qty: number; revenueMinor: number; unit: string };
-  const [saleRows, deliveryRows] = await Promise.all([
-    SaleItem.aggregate<Row>([
-      { $match: { shopId: oid(shopId) } },
-      { $lookup: { from: 'sales', localField: 'saleId', foreignField: '_id', as: 'sale' } },
-      { $unwind: '$sale' },
-      { $match: { 'sale.status': SaleStatus.COMPLETED, 'sale.soldAt': { $gte: range.start, $lte: range.end } } },
-      { $lookup: { from: 'units', localField: 'unitId', foreignField: '_id', as: 'unit' } },
-      { $unwind: { path: '$unit', preserveNullAndEmptyArrays: true } },
-      { $group: { _id: '$productId', name: { $first: '$name' }, qty: { $sum: '$quantity' }, revenueMinor: { $sum: '$lineTotalMinor' }, unit: { $first: '$unit.symbol' } } },
-    ]),
-    // Delivered goods (same window/status the revenue & profit cards use).
-    Delivery.aggregate<Row>([
-      { $match: { shopId: oid(shopId), status: { $ne: DeliveryStatus.CANCELLED }, createdAt: { $gte: range.start, $lte: range.end } } },
-      { $unwind: '$lines' },
-      { $group: { _id: '$lines.productId', name: { $first: '$lines.name' }, qty: { $sum: '$lines.quantity' }, revenueMinor: { $sum: '$lines.lineTotalMinor' }, unit: { $first: '$lines.unitSymbol' } } },
-    ]),
-  ]);
+interface ProductSalesRow {
+  _id: string;
+  name: string;
+  qty: number;
+  revenueMinor: number;
+  unit: string;
+}
 
-  // Merge the two sources per product (a product can be both sold and delivered).
-  const byProduct = new Map<string, Row>();
-  for (const r of [...saleRows, ...deliveryRows]) {
-    const key = String(r._id);
-    const existing = byProduct.get(key);
+/**
+ * Product-wise sold quantity + revenue for a range. Combines counter/credit sales
+ * with deliveries (goods leave on delivery too), merged per product so quantities
+ * can be reported per measurement unit.
+ */
+async function productSales(shopId: string, range: DateRange): Promise<ProductSalesRow[]> {
+  const [sales, deliveries, units] = await Promise.all([
+    saleRepo.listByShop(shopId),
+    deliveryRepo.listByShop(shopId),
+    unitRepo.listForShop(shopId),
+  ]);
+  const unitSymbol = new Map(units.map((u) => [u.id, u.symbol]));
+
+  const relevant = sales.filter((s) => s.status === SaleStatus.COMPLETED && inRange(s.soldAt, range));
+  const itemsPerSale = await Promise.all(relevant.map((s) => saleRepo.listItems(s.id)));
+
+  const byProduct = new Map<string, ProductSalesRow>();
+  const add = (row: ProductSalesRow) => {
+    const existing = byProduct.get(row._id);
     if (existing) {
-      existing.qty += r.qty;
-      existing.revenueMinor += r.revenueMinor;
-      if (!existing.unit) existing.unit = r.unit;
+      existing.qty += row.qty;
+      existing.revenueMinor += row.revenueMinor;
+      if (!existing.unit) existing.unit = row.unit;
     } else {
-      byProduct.set(key, { _id: r._id, name: r.name, qty: r.qty, revenueMinor: r.revenueMinor, unit: r.unit });
+      byProduct.set(row._id, { ...row });
+    }
+  };
+
+  for (const item of itemsPerSale.flat()) {
+    add({
+      _id: item.productId,
+      name: item.name,
+      qty: item.quantity,
+      revenueMinor: item.lineTotalMinor,
+      unit: unitSymbol.get(item.unitId) ?? '',
+    });
+  }
+
+  // Delivered goods (same window/status the revenue & profit cards use).
+  for (const d of deliveries) {
+    if (d.status === DeliveryStatus.CANCELLED || !inRange(d.createdAt, range)) continue;
+    for (const line of d.lines) {
+      add({
+        _id: line.productId,
+        name: line.name,
+        qty: line.quantity,
+        revenueMinor: line.lineTotalMinor,
+        unit: line.unitSymbol,
+      });
     }
   }
+
   return [...byProduct.values()].sort((a, b) => b.revenueMinor - a.revenueMinor);
 }
 
@@ -145,55 +180,53 @@ function quantityByUnit(products: { qty: number; unit?: string }[]) {
 }
 
 async function wastageTotal(shopId: string, range: DateRange): Promise<number> {
-  const rows = await InventoryTransaction.aggregate<{ total: number }>([
-    { $match: { shopId: oid(shopId), type: InventoryTxnType.WASTAGE, occurredAt: { $gte: range.start, $lte: range.end } } },
-    { $group: { _id: null, total: { $sum: { $abs: '$quantity' } } } },
-  ]);
-  return rows[0]?.total ?? 0;
+  const rows = await txnRepo.listByShopType(shopId, InventoryTxnType.WASTAGE);
+  return rows
+    .filter((r) => inRange(r.occurredAt, range))
+    .reduce((acc, r) => acc + Math.abs(r.quantity), 0);
 }
 
 async function inventorySnapshot(shopId: string) {
-  const rows = await Product.aggregate<{ stockValueMinor: number; stockSellValueMinor: number; lowStock: number; tracked: number }>([
-    { $match: { shopId: oid(shopId), isDeleted: false, trackInventory: true } },
-    {
-      $group: {
-        _id: null,
-        stockValueMinor: { $sum: { $multiply: ['$currentStock', '$purchaseCostMinor'] } },
-        // Value of remaining stock at selling price — the "price" of what's on hand.
-        stockSellValueMinor: { $sum: { $multiply: ['$currentStock', '$sellingPriceMinor'] } },
-        lowStock: { $sum: { $cond: [{ $lte: ['$currentStock', '$minStock'] }, 1, 0] } },
-        tracked: { $sum: 1 },
-      },
-    },
-  ]);
-  return rows[0] ?? { stockValueMinor: 0, stockSellValueMinor: 0, lowStock: 0, tracked: 0 };
+  const products = (await productRepo.listByShop(shopId)).filter((p) => p.trackInventory);
+  return {
+    stockValueMinor: products.reduce((s, p) => s + p.currentStock * p.purchaseCostMinor, 0),
+    // Value of remaining stock at selling price — the "price" of what's on hand.
+    stockSellValueMinor: products.reduce((s, p) => s + p.currentStock * p.sellingPriceMinor, 0),
+    lowStock: products.filter((p) => p.currentStock <= p.minStock).length,
+    tracked: products.length,
+  };
 }
 
 /** Dues that arose from transactions dated within the range (today): sale dues + delivery dues. */
 async function outstandingInRange(shopId: string, range: DateRange): Promise<number> {
-  const [saleRows, deliveryRows] = await Promise.all([
-    Sale.aggregate<{ total: number }>([
-      { $match: { shopId: oid(shopId), status: SaleStatus.COMPLETED, soldAt: { $gte: range.start, $lte: range.end }, dueMinor: { $gt: 0 } } },
-      { $group: { _id: null, total: { $sum: '$dueMinor' } } },
-    ]),
-    Delivery.aggregate<{ total: number }>([
-      { $match: { shopId: oid(shopId), status: { $ne: DeliveryStatus.CANCELLED }, createdAt: { $gte: range.start, $lte: range.end }, remainingMinor: { $gt: 0 } } },
-      { $group: { _id: null, total: { $sum: '$remainingMinor' } } },
-    ]),
+  const [sales, deliveries] = await Promise.all([
+    saleRepo.listByShop(shopId),
+    deliveryRepo.listByShop(shopId),
   ]);
-  return (saleRows[0]?.total ?? 0) + (deliveryRows[0]?.total ?? 0);
+  const saleDues = sales
+    .filter((s) => s.status === SaleStatus.COMPLETED && s.dueMinor > 0 && inRange(s.soldAt, range))
+    .reduce((acc, s) => acc + s.dueMinor, 0);
+  const deliveryDues = deliveries
+    .filter((d) => d.status !== DeliveryStatus.CANCELLED && d.remainingMinor > 0 && inRange(d.createdAt, range))
+    .reduce((acc, d) => acc + d.remainingMinor, 0);
+  return saleDues + deliveryDues;
 }
 
 /** Remaining stock across all tracked products, summed per unit (L, kg, pcs …). */
 async function stockByUnit(shopId: string) {
-  const rows = await Product.aggregate<{ _id: string | null; qty: number; count: number }>([
-    { $match: { shopId: oid(shopId), isDeleted: false, trackInventory: true } },
-    { $lookup: { from: 'units', localField: 'unitId', foreignField: '_id', as: 'unit' } },
-    { $unwind: { path: '$unit', preserveNullAndEmptyArrays: true } },
-    { $group: { _id: '$unit.symbol', qty: { $sum: '$currentStock' }, count: { $sum: 1 } } },
-    { $sort: { qty: -1 } },
-  ]);
-  return rows.map((r) => ({ unit: r._id || 'unit', qty: r.qty, products: r.count }));
+  const [products, units] = await Promise.all([productRepo.listByShop(shopId), unitRepo.listForShop(shopId)]);
+  const unitSymbol = new Map(units.map((u) => [u.id, u.symbol]));
+  const byUnit = new Map<string, { qty: number; products: number }>();
+  for (const p of products.filter((x) => x.trackInventory)) {
+    const key = unitSymbol.get(p.unitId) || 'unit';
+    const cur = byUnit.get(key) ?? { qty: 0, products: 0 };
+    cur.qty += p.currentStock;
+    cur.products += 1;
+    byUnit.set(key, cur);
+  }
+  return [...byUnit.entries()]
+    .map(([unit, v]) => ({ unit, qty: v.qty, products: v.products }))
+    .sort((a, b) => b.qty - a.qty);
 }
 
 /**
@@ -202,32 +235,31 @@ async function stockByUnit(shopId: string) {
  * purchase/cost price. Cancelled/reversed sales are excluded.
  */
 async function profitForRange(shopId: string, range?: DateRange) {
-  const saleMatch: Record<string, unknown> = { 'sale.status': SaleStatus.COMPLETED };
-  if (range) saleMatch['sale.soldAt'] = { $gte: range.start, $lte: range.end };
-  const deliveryMatch: Record<string, unknown> = { shopId: oid(shopId), status: { $ne: DeliveryStatus.CANCELLED } };
-  if (range) deliveryMatch.createdAt = { $gte: range.start, $lte: range.end };
-
-  const [saleRows, deliveryRows] = await Promise.all([
-    // Counter/credit sales.
-    SaleItem.aggregate<{ revenue: number; cost: number }>([
-      { $match: { shopId: oid(shopId) } },
-      { $lookup: { from: 'sales', localField: 'saleId', foreignField: '_id', as: 'sale' } },
-      { $unwind: '$sale' },
-      { $match: saleMatch },
-      { $lookup: { from: 'products', localField: 'productId', foreignField: '_id', as: 'product' } },
-      { $unwind: '$product' },
-      { $group: { _id: null, revenue: { $sum: '$lineTotalMinor' }, cost: { $sum: { $multiply: ['$quantity', '$product.purchaseCostMinor'] } } } },
-    ]),
-    // Deliveries (goods sold on delivery — profit is realized regardless of payment).
-    // Per-delivery profit = Selling (subtotal) − Cost (costPriceMinor).
-    Delivery.aggregate<{ revenue: number; cost: number }>([
-      { $match: deliveryMatch },
-      { $group: { _id: null, revenue: { $sum: '$subtotalMinor' }, cost: { $sum: '$costPriceMinor' } } },
-    ]),
+  const [sales, deliveries, products] = await Promise.all([
+    saleRepo.listByShop(shopId),
+    deliveryRepo.listByShop(shopId),
+    productRepo.listByShop(shopId),
   ]);
+  const costById = new Map(products.map((p) => [p.id, p.purchaseCostMinor]));
 
-  const revenueMinor = (saleRows[0]?.revenue ?? 0) + (deliveryRows[0]?.revenue ?? 0);
-  const costMinor = (saleRows[0]?.cost ?? 0) + (deliveryRows[0]?.cost ?? 0);
+  const relevant = sales.filter(
+    (s) => s.status === SaleStatus.COMPLETED && (!range || inRange(s.soldAt, range)),
+  );
+  const items = (await Promise.all(relevant.map((s) => saleRepo.listItems(s.id)))).flat();
+
+  const saleRevenue = items.reduce((s, i) => s + i.lineTotalMinor, 0);
+  const saleCost = items.reduce((s, i) => s + i.quantity * (costById.get(i.productId) ?? 0), 0);
+
+  // Deliveries (goods sold on delivery — profit is realized regardless of payment).
+  // Per-delivery profit = Selling (subtotal) − Cost (costPriceMinor).
+  const liveDeliveries = deliveries.filter(
+    (d) => d.status !== DeliveryStatus.CANCELLED && (!range || inRange(d.createdAt, range)),
+  );
+  const deliveryRevenue = liveDeliveries.reduce((s, d) => s + d.subtotalMinor, 0);
+  const deliveryCost = liveDeliveries.reduce((s, d) => s + d.costPriceMinor, 0);
+
+  const revenueMinor = saleRevenue + deliveryRevenue;
+  const costMinor = saleCost + deliveryCost;
   return { revenueMinor, costMinor, profitMinor: revenueMinor - costMinor };
 }
 
@@ -235,7 +267,12 @@ async function profitForRange(shopId: string, range?: DateRange) {
 export async function profitLoss(ctx: TenantContext) {
   const tz = await shopTimezone(ctx.shopId);
   const now = new Date();
-  const startDaysAgo = (n: number) => { const d = new Date(now); d.setDate(now.getDate() - n); d.setHours(0, 0, 0, 0); return d; };
+  const startDaysAgo = (n: number) => {
+    const d = new Date(now);
+    d.setDate(now.getDate() - n);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  };
   const today = dayRange(undefined, tz);
   const week: DateRange = { start: startDaysAgo(6), end: now };
   const month: DateRange = { start: startDaysAgo(29), end: now };
@@ -249,21 +286,27 @@ export async function profitLoss(ctx: TenantContext) {
   return { overall, daily, weekly, monthly };
 }
 
+async function deliveryCount(shopId: string, range: DateRange): Promise<number> {
+  const rows = await deliveryRepo.listByShop(shopId);
+  return rows.filter((d) => inRange(d.createdAt, range)).length;
+}
+
 // ---- Public report methods ----
 
 export async function dashboard(ctx: TenantContext, rangeKey?: string) {
   const tz = await shopTimezone(ctx.shopId);
   const range = namedRange(rangeKey, tz);
-  const [sales, payments, outstanding, todayOutstanding, products, inventory, deliveries, stockUnits] = await Promise.all([
-    salesTotals(ctx.shopId, range),
-    paymentsTotal(ctx.shopId, range),
-    outstandingTotal(ctx.shopId),
-    outstandingInRange(ctx.shopId, range), // dues arising today only
-    productSales(ctx.shopId, range),
-    inventorySnapshot(ctx.shopId),
-    Delivery.countDocuments({ shopId: ctx.shopId, createdAt: { $gte: range.start, $lte: range.end } }),
-    stockByUnit(ctx.shopId),
-  ]);
+  const [sales, payments, outstanding, todayOutstanding, products, inventory, deliveries, stockUnits] =
+    await Promise.all([
+      salesTotals(ctx.shopId, range),
+      paymentsTotal(ctx.shopId, range),
+      outstandingTotal(ctx.shopId),
+      outstandingInRange(ctx.shopId, range), // dues arising today only
+      productSales(ctx.shopId, range),
+      inventorySnapshot(ctx.shopId),
+      deliveryCount(ctx.shopId, range),
+      stockByUnit(ctx.shopId),
+    ]);
   const qtySold = products.reduce((s, p) => s + p.qty, 0);
   return {
     range: rangeKey ?? 'today',
@@ -293,7 +336,7 @@ export async function daily(ctx: TenantContext, dateStr?: string) {
     outstandingTotal(ctx.shopId),
     productSales(ctx.shopId, range),
     wastageTotal(ctx.shopId, range),
-    Delivery.countDocuments({ shopId: ctx.shopId, createdAt: { $gte: range.start, $lte: range.end } }),
+    deliveryCount(ctx.shopId, range),
   ]);
   return {
     date: dateStr ?? new Date().toISOString().slice(0, 10),
@@ -336,41 +379,45 @@ export async function dailyMilk(ctx: TenantContext, dateStr?: string) {
   const tz = await shopTimezone(ctx.shopId);
   const range = dayRange(dateStr, tz);
 
-  const [openings, movements, products] = await Promise.all([
-    InventoryTransaction.aggregate<{ _id: Types.ObjectId; opening: number }>([
-      { $match: { shopId: oid(ctx.shopId), occurredAt: { $lt: range.start } } },
-      { $sort: { occurredAt: -1, _id: -1 } },
-      { $group: { _id: '$productId', opening: { $first: '$balanceAfter' } } },
-    ]),
-    InventoryTransaction.aggregate<{ _id: { p: Types.ObjectId; t: string }; qty: number }>([
-      { $match: { shopId: oid(ctx.shopId), occurredAt: { $gte: range.start, $lte: range.end } } },
-      { $group: { _id: { p: '$productId', t: '$type' }, qty: { $sum: '$quantity' } } },
-    ]),
-    Product.find({ shopId: ctx.shopId, isDeleted: false, trackInventory: true }).populate('unitId', 'symbol'),
+  const [products, units] = await Promise.all([
+    productRepo.listByShop(ctx.shopId),
+    unitRepo.listForShop(ctx.shopId),
   ]);
+  const tracked = products.filter((p) => p.trackInventory);
+  const unitSymbol = new Map(units.map((u) => [u.id, u.symbol]));
 
-  const openingMap = new Map(openings.map((o) => [o._id.toString(), o.opening]));
-  const moveMap = new Map<string, Record<string, number>>();
-  for (const m of movements) {
-    const pid = m._id.p.toString();
-    const rec = moveMap.get(pid) ?? {};
-    rec[m._id.t] = m.qty;
-    moveMap.set(pid, rec);
-  }
+  // One ledger read per product — the ledger is partitioned by productId, so this
+  // is a point Query each rather than a table-wide scan.
+  const ledgers = await Promise.all(tracked.map((p) => txnRepo.listByProduct(p.id)));
 
-  const rows = products.map((p) => {
-    const pid = p._id.toString();
-    const opening = openingMap.get(pid) ?? 0;
-    const mv = moveMap.get(pid) ?? {};
-    const stockIn = (mv[InventoryTxnType.STOCK_IN] ?? 0) + (mv[InventoryTxnType.PRODUCTION] ?? 0) + (mv[InventoryTxnType.RETURN] ?? 0);
-    const sold = Math.abs(mv[InventoryTxnType.SALE] ?? 0);
-    const wastage = Math.abs(mv[InventoryTxnType.WASTAGE] ?? 0);
-    const adjustment = mv[InventoryTxnType.ADJUSTMENT] ?? 0;
-    const net = Object.values(mv).reduce((s, q) => s + q, 0);
+  const rows = tracked.map((p, i) => {
+    const entries = (ledgers[i] ?? []).filter((e) => e.shopId === ctx.shopId);
+
+    // Opening = balanceAfter of the most recent movement before the window.
+    const before = entries
+      .filter((e) => new Date(e.occurredAt).getTime() < range.start.getTime())
+      .sort((a, b) => b.sk.localeCompare(a.sk));
+    const opening = before[0]?.balanceAfter ?? 0;
+
+    const within = entries.filter((e) => inRange(e.occurredAt, range));
+    const byType = within.reduce<Record<string, number>>((acc, e) => {
+      acc[e.type] = (acc[e.type] ?? 0) + e.quantity;
+      return acc;
+    }, {});
+
+    const stockIn =
+      (byType[InventoryTxnType.STOCK_IN] ?? 0) +
+      (byType[InventoryTxnType.PRODUCTION] ?? 0) +
+      (byType[InventoryTxnType.RETURN] ?? 0);
+    const sold = Math.abs(byType[InventoryTxnType.SALE] ?? 0);
+    const wastage = Math.abs(byType[InventoryTxnType.WASTAGE] ?? 0);
+    const adjustment = byType[InventoryTxnType.ADJUSTMENT] ?? 0;
+    const net = Object.values(byType).reduce((s, q) => s + q, 0);
+
     return {
-      productId: pid,
+      productId: p.id,
       name: p.name,
-      unit: (p.unitId as unknown as { symbol?: string })?.symbol ?? '',
+      unit: unitSymbol.get(p.unitId) ?? '',
       opening,
       stockIn,
       sold,
@@ -385,27 +432,29 @@ export async function dailyMilk(ctx: TenantContext, dateStr?: string) {
 
 /** Platform-wide overview for the super admin (§29). */
 export async function platformOverview() {
-  const [liveShops, revenueAgg, salesCount] = await Promise.all([
-    // DynamoDB has no aggregation pipeline; shops are low-cardinality (one row
-    // per business), so the counts are tallied from the byStatus index reads.
-    shopRepo.listAllActive(),
-    Sale.aggregate<{ total: number }>([
-      { $match: { status: SaleStatus.COMPLETED } },
-      { $group: { _id: null, total: { $sum: '$totalMinor' } } },
-    ]),
-    Sale.countDocuments({ status: SaleStatus.COMPLETED }),
-  ]);
+  // DynamoDB has no aggregation pipeline and no cross-tenant Query, so the
+  // per-shop totals are summed from each shop's own partition. Shops are
+  // low-cardinality (one row per business), which keeps this bounded.
+  const liveShops = await shopRepo.listAllActive();
+
+  const perShop = await Promise.all(
+    liveShops.map(async (shop) => {
+      const sales = (await saleRepo.listByShop(shop.id)).filter((s) => s.status === SaleStatus.COMPLETED);
+      return { count: sales.length, revenue: sales.reduce((s, x) => s + x.totalMinor, 0) };
+    }),
+  );
+
   const byStatus = liveShops.reduce<Record<string, number>>((acc, s) => {
     acc[s.status] = (acc[s.status] ?? 0) + 1;
     return acc;
   }, {});
-  const totalShops = liveShops.length;
+
   return {
-    totalShops,
+    totalShops: liveShops.length,
     activeShops: byStatus.ACTIVE ?? 0,
     pendingShops: byStatus.PENDING ?? 0,
     suspendedShops: byStatus.SUSPENDED ?? 0,
-    totalSales: salesCount,
-    totalRevenueMinor: revenueAgg[0]?.total ?? 0,
+    totalSales: perShop.reduce((s, p) => s + p.count, 0),
+    totalRevenueMinor: perShop.reduce((s, p) => s + p.revenue, 0),
   };
 }

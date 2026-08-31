@@ -21,7 +21,7 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
 
 export const create = asyncHandler(async (req: Request, res: Response) => {
   const { payment, balanceAfterMinor } = await service.recordPayment(ctx(req), req.body, req.auth!.userId);
-  await recordAudit({ actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: ctx(req).shopId, action: 'PAYMENT_CREATE', resource: 'Payment', resourceId: payment._id.toString(), ip: req.ip, metadata: { amountMinor: payment.amountMinor } });
+  await recordAudit({ actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: ctx(req).shopId, action: 'PAYMENT_CREATE', resource: 'Payment', resourceId: payment.id, ip: req.ip, metadata: { amountMinor: payment.amountMinor } });
   created(res, { payment, balanceAfterMinor });
 });
 

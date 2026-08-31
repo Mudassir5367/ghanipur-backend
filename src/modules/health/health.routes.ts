@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import mongoose from 'mongoose';
+import { pingDatabase } from '../../config/dynamo.js';
 import { ok } from '../../utils/http.js';
 
 export const healthRouter = Router();
@@ -9,12 +9,23 @@ healthRouter.get('/', (_req, res) => {
   ok(res, { status: 'ok', uptime: process.uptime() });
 });
 
-// Readiness: dependencies (DB) are reachable (§72).
+/**
+ * Readiness: the datastore is reachable (§72).
+ *
+ * Mongoose exposed a cached connection state; DynamoDB is stateless HTTP, so
+ * readiness is an actual DescribeTable round trip. `readyState` is kept in the
+ * response (1 up / 0 down) because orchestrator probes and the frontend already
+ * read that shape.
+ */
 healthRouter.get('/ready', async (_req, res) => {
-  const state = mongoose.connection.readyState; // 1 = connected
-  const dbOk = state === 1;
+  let dbOk = true;
+  try {
+    await pingDatabase({ strict: true });
+  } catch {
+    dbOk = false;
+  }
   res.status(dbOk ? 200 : 503).json({
     success: dbOk,
-    data: { db: dbOk ? 'up' : 'down', readyState: state },
+    data: { db: dbOk ? 'up' : 'down', readyState: dbOk ? 1 : 0 },
   });
 });

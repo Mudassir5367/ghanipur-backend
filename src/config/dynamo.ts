@@ -26,16 +26,18 @@ export const ddb = DynamoDBDocumentClient.from(ddbClient, {
  * on a deployment that runs perfectly well on Mongo alone. Turn the flag on once
  * the port is complete and the tables actually back live reads.
  */
-export async function pingDatabase(): Promise<void> {
+export async function pingDatabase(opts: { strict?: boolean } = {}): Promise<void> {
   const anyTable = Object.values(TABLES)[0];
   try {
     await ddbClient.send(new DescribeTableCommand({ TableName: anyTable }));
-    logger.info('DynamoDB reachable');
+    if (!opts.strict) logger.info('DynamoDB reachable');
   } catch (err) {
-    if (env.dynamoRequired) throw err;
+    // The readiness probe always wants the truth; boot tolerance is a separate
+    // decision governed by DYNAMO_REQUIRED.
+    if (opts.strict || env.dynamoRequired) throw err;
     logger.warn(
       { err, table: anyTable },
-      'DynamoDB unreachable — continuing, since no module reads it yet. Set DYNAMO_REQUIRED=true to make this fatal.',
+      'DynamoDB unreachable at boot. Set DYNAMO_REQUIRED=true to make this fatal.',
     );
   }
 }
