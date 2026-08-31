@@ -10,9 +10,10 @@ import { env } from './config/env.js';
 import { logger } from './config/logger.js';
 import { apiV1 } from './routes/index.js';
 import { healthRouter } from './modules/health/health.routes.js';
-import { uploadDir } from './modules/upload/upload.routes.js';
+import { getObject, isSafeKey } from './config/storage.js';
 import { errorHandler, notFound } from './middlewares/error.js';
 import { ApiError } from './utils/ApiError.js';
+import { asyncHandler } from './utils/http.js';
 
 export function createApp(): Express {
   const app = express();
@@ -66,16 +67,27 @@ export function createApp(): Express {
   );
 
   app.use('/health', healthRouter);
-  // Uploaded images (product photos, avatars) — public, cacheable, and loadable
-  // cross-origin (the browser page is on a different port than the API).
-  app.use(
-    '/uploads',
-    express.static(uploadDir, {
-      maxAge: '7d',
-      immutable: true,
-      setHeaders: (res) => res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin'),
-    }),
-  );
+  /**
+   * Uploaded images (product photos, avatars) — public, cacheable, and loadable
+   * cross-origin (the browser page is on a different port than the API).
+   *
+   * Streamed from private S3 rather than served off disk, so the bucket stays
+   * closed to the internet and the URL stays same-origin. Keys embed a UUID and
+   * an object never changes under a key, so these are safe to cache immutably.
+   */
+  app.get('/uploads/:key', asyncHandler(async (req, res) => {
+    const key = req.params.key ?? '';
+    if (!isSafeKey(key)) throw ApiError.badRequest('Invalid image reference', 'INVALID_KEY');
+
+    const object = await getObject(key);
+    if (!object) throw ApiError.notFound('Image not found', 'IMAGE_NOT_FOUND');
+
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
+    if (object.contentType) res.setHeader('Content-Type', object.contentType);
+    if (object.contentLength !== undefined) res.setHeader('Content-Length', String(object.contentLength));
+    object.stream.pipe(res);
+  }));
   app.use('/api/v1', apiV1);
 
   app.use(notFound);

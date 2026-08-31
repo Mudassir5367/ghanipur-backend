@@ -64,7 +64,13 @@ const schema = z.object({
   SMTP_PASS: z.string().optional(),
   SMTP_FROM: z.string().optional(), // e.g. "Ghanipur <no-reply@yourdomain.com>"
 
-  // Where uploaded product images are served from (absolute URLs stored in DB).
+  // Image storage. With S3_BUCKET set, uploads go to S3 via the instance role;
+  // without it they fall back to local disk, which is what tests and local dev
+  // use so neither needs AWS credentials.
+  S3_BUCKET: z.string().optional(),
+  S3_PREFIX: z.string().default(''), // e.g. "products/" to namespace within a shared bucket
+  S3_ENDPOINT: z.string().url().optional(), // MinIO/localstack override
+  // Local fallback directory, only used when S3_BUCKET is unset.
   UPLOAD_DIR: z.string().default('uploads'),
   MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(5 * 1024 * 1024),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(15 * 60 * 1000),

@@ -1,9 +1,9 @@
 # Deployment stack for the Ghanipur BACKEND.
 #
-# There is no database container. DynamoDB is the only datastore and it is a
-# managed AWS service, so the API talks to it over the network using the EC2
-# instance role — nothing to run, nothing to back up here, and no data volume
-# that can be lost with the box.
+# There is no database container and no data volume. DynamoDB stores the records
+# and S3 stores the images; both are managed AWS services reached through the EC2
+# instance role. Nothing on this machine is stateful, so losing the box loses
+# nothing — replace it and redeploy.
 #
 # Backend and frontend run on SEPARATE EC2 machines, so they cannot share a
 # Docker network — the frontend reaches this API by address. The Next server
@@ -29,15 +29,9 @@ services:
       NODE_ENV: production
       PORT: "5000"
       UPLOAD_DIR: /app/uploads
-    volumes:
-      # Product images still live on local disk (S3-ready — the DB stores URLs).
-      # This is now the only stateful thing on the machine.
-      - uploads_data:/app/uploads
     ports:
       - "${BACKEND_PORT:-5000}:5000"
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "3" }
 
-volumes:
-  uploads_data:
