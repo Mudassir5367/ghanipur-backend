@@ -2,6 +2,7 @@ import {
   CreateTableCommand,
   DescribeTableCommand,
   DescribeTimeToLiveCommand,
+  UpdateTableCommand,
   UpdateTimeToLiveCommand,
   waitUntilTableExists,
   type AttributeDefinition,
@@ -51,6 +52,59 @@ function globalSecondaryIndexes(def: TableDef): GlobalSecondaryIndex[] | undefin
   }));
 }
 
+/**
+ * Adds any GSI declared in TABLE_DEFS that the live table is missing, so a new
+ * access pattern can ship without dropping the table. DynamoDB permits exactly
+ * one index addition per UpdateTable and rejects the next while one is
+ * backfilling, so these are applied one at a time and awaited.
+ */
+async function addMissingGsis(name: string, def: TableDef): Promise<string[]> {
+  const declared = def.gsis ?? [];
+  if (!declared.length) return [];
+
+  const added: string[] = [];
+  for (const gsi of declared) {
+    const current = await ddbClient.send(new DescribeTableCommand({ TableName: name }));
+    const live = current.Table?.GlobalSecondaryIndexes ?? [];
+    if (live.some((g) => g.IndexName === gsi.name)) continue;
+
+    // Only the attributes this index keys on need declaring on the update.
+    const attrs: AttributeDefinition[] = [{ AttributeName: gsi.pk.name, AttributeType: gsi.pk.type }];
+    if (gsi.sk) attrs.push({ AttributeName: gsi.sk.name, AttributeType: gsi.sk.type });
+
+    await ddbClient.send(
+      new UpdateTableCommand({
+        TableName: name,
+        AttributeDefinitions: attrs,
+        GlobalSecondaryIndexUpdates: [
+          {
+            Create: {
+              IndexName: gsi.name,
+              KeySchema: keySchema(gsi.pk, gsi.sk),
+              Projection: { ProjectionType: gsi.projection ?? 'ALL' },
+            },
+          },
+        ],
+      }),
+    );
+    await waitForIndexActive(name, gsi.name);
+    added.push(gsi.name);
+  }
+  return added;
+}
+
+/** No SDK waiter exists for index status, so poll DescribeTable. */
+async function waitForIndexActive(table: string, index: string, timeoutMs = 300_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const res = await ddbClient.send(new DescribeTableCommand({ TableName: table }));
+    const found = res.Table?.GlobalSecondaryIndexes?.find((g) => g.IndexName === index);
+    if (found?.IndexStatus === 'ACTIVE') return;
+    if (Date.now() > deadline) throw new Error(`GSI ${table}.${index} did not become ACTIVE in time`);
+    await new Promise((r) => setTimeout(r, 5_000));
+  }
+}
+
 async function exists(name: string): Promise<boolean> {
   try {
     await ddbClient.send(new DescribeTableCommand({ TableName: name }));
@@ -74,15 +128,12 @@ async function ensureTtl(name: string, attribute: string): Promise<boolean> {
   return true;
 }
 
-async function main(): Promise<void> {
-  const prefix = process.env.DYNAMO_TABLE_PREFIX ?? '';
-  const region = process.env.AWS_REGION ?? 'ap-south-1';
-  // eslint-disable-next-line no-console
-  console.log(
-    `Provisioning ${TABLE_DEFS.length} tables in ${region}` +
-      `${prefix ? ` with prefix "${prefix}"` : ' (no prefix)'}\n`,
-  );
-
+/**
+ * Idempotently brings every declared table into existence. Exported so the test
+ * harness can prepare its own prefixed tables through exactly the same code the
+ * deploy uses — a second implementation would be free to drift.
+ */
+export async function provisionAll(log: (msg: string) => void = () => {}): Promise<{ created: number; skipped: number }> {
   let created = 0;
   let skipped = 0;
 
@@ -90,8 +141,12 @@ async function main(): Promise<void> {
     const name = tableName(def.logicalName);
 
     if (await exists(name)) {
-      // eslint-disable-next-line no-console
-      console.log(`  skip    ${name} (already exists)`);
+      const added = await addMissingGsis(name, def);
+      log(
+        added.length
+          ? `  update  ${name} (added GSI: ${added.join(', ')})`
+          : `  skip    ${name} (already exists)`,
+      );
       skipped += 1;
     } else {
       await ddbClient.send(
@@ -106,23 +161,36 @@ async function main(): Promise<void> {
       // GSIs finish backfilling after the table reports ACTIVE; check:dynamo
       // verifies their status separately.
       await waitUntilTableExists({ client: ddbClient, maxWaitTime: 300 }, { TableName: name });
-      // eslint-disable-next-line no-console
-      console.log(`  created ${name}`);
+      log(`  created ${name}`);
       created += 1;
     }
 
     if (def.ttlAttribute && (await ensureTtl(name, def.ttlAttribute))) {
-      // eslint-disable-next-line no-console
-      console.log(`          -> TTL enabled on "${def.ttlAttribute}"`);
+      log(`          -> TTL enabled on "${def.ttlAttribute}"`);
     }
   }
 
-  // eslint-disable-next-line no-console
-  console.log(`\n${created} created, ${skipped} already present. Run \`npm run check:dynamo\` to verify.`);
+  return { created, skipped };
 }
 
-main().catch((err) => {
+async function main(): Promise<void> {
+  const prefix = process.env.DYNAMO_TABLE_PREFIX ?? '';
+  const region = process.env.AWS_REGION ?? 'ap-south-1';
   // eslint-disable-next-line no-console
-  console.error('Provisioning failed:', err instanceof Error ? err.message : err);
-  process.exit(1);
-});
+  const log = (msg: string) => console.log(msg);
+  log(
+    `Provisioning ${TABLE_DEFS.length} tables in ${region}` +
+      `${prefix ? ` with prefix "${prefix}"` : ' (no prefix)'}\n`,
+  );
+  const { created, skipped } = await provisionAll(log);
+  log(`\n${created} created, ${skipped} already present. Run \`npm run check:dynamo\` to verify.`);
+}
+
+// Only self-execute when run as a script; importing it (tests) must not provision.
+if (process.argv[1]?.includes('provisionDynamoTables')) {
+  main().catch((err) => {
+    // eslint-disable-next-line no-console
+    console.error('Provisioning failed:', err instanceof Error ? err.message : err);
+    process.exit(1);
+  });
+}

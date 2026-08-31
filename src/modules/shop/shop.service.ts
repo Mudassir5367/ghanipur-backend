@@ -2,7 +2,8 @@ import type { ClientSession } from 'mongoose';
 import { Shop, ShopStatus, type ShopDoc } from '../../models/shop.model.js';
 import { ShopSettings } from '../../models/shopSettings.model.js';
 import { Category } from '../../models/category.model.js';
-import { User } from '../../models/user.model.js';
+import * as userRepo from '../../repositories/dynamo/userRepository.js';
+import { UniqueConstraintError } from '../../repositories/dynamo/base.js';
 import { Role } from '../../constants/roles.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { uniqueSlug, slugify } from '../../utils/slug.js';
@@ -107,23 +108,52 @@ export async function getShopByIdAdmin(id: string): Promise<ShopDoc> {
   return shop;
 }
 
+/**
+ * Creates the owner account and their shop.
+ *
+ * TRANSITIONAL: User now lives in DynamoDB while Shop, ShopSettings and Category
+ * are still in Mongo, so this cannot be one transaction. Instead the owner is
+ * created first, the shop is provisioned inside a Mongo transaction, and any
+ * failure after the owner exists is compensated by deleting it and releasing its
+ * email guard — so a half-created owner can never block the address. The window
+ * closes for good once Shop moves to DynamoDB and both writes share one
+ * TransactWriteItems.
+ */
 export async function createShop(input: CreateShopInput): Promise<ShopDoc> {
-  const existing = await User.findOne({ email: input.ownerEmail }).lean();
-  if (existing) throw ApiError.conflict('Owner email already registered', 'EMAIL_TAKEN');
-
   const passwordHash = await hashPassword(input.ownerPassword);
 
-  return withTransaction(async (session) => {
-    const [owner] = await User.create(
-      [{ name: input.ownerName, email: input.ownerEmail, phone: input.phone, passwordHash, role: Role.SHOP_ADMIN }],
-      { session },
-    );
+  let owner;
+  try {
+    owner = await userRepo.create({
+      name: input.ownerName,
+      email: input.ownerEmail,
+      phone: input.phone,
+      passwordHash,
+      role: Role.SHOP_ADMIN,
+    });
+  } catch (err) {
+    if (err instanceof UniqueConstraintError) {
+      throw ApiError.conflict('Owner email already registered', 'EMAIL_TAKEN');
+    }
+    throw err;
+  }
+
+  try {
     // Super-admin-created shops are pre-approved by default.
-    const shop = await provisionShop(session, owner!, input.shopName, { phone: input.phone, status: input.status ?? ShopStatus.ACTIVE });
-    owner!.shopId = shop._id;
-    await owner!.save({ session });
+    const shop = await withTransaction((session) =>
+      provisionShop(session, { _id: owner.id }, input.shopName, {
+        phone: input.phone,
+        status: input.status ?? ShopStatus.ACTIVE,
+      }),
+    );
+    await userRepo.update(owner.id, { shopId: shop._id.toString() });
     return shop;
-  });
+  } catch (err) {
+    await userRepo.hardDelete(owner.id, owner.email).catch(() => {
+      /* compensation is best-effort; the original failure is what matters */
+    });
+    throw err;
+  }
 }
 
 /**
@@ -132,19 +162,26 @@ export async function createShop(input: CreateShopInput): Promise<ShopDoc> {
  * embedded shopId changes.
  */
 export async function createMyShop(userId: string, input: { shopName: string; phone?: string }): Promise<ShopDoc> {
-  const user = await User.findById(userId);
+  const user = await userRepo.findById(userId);
   if (!user) throw ApiError.notFound('User not found', 'USER_NOT_FOUND');
   if (user.role !== Role.SHOP_ADMIN) throw ApiError.forbidden('Only shop admins can create a shop', 'FORBIDDEN');
   if (user.shopId) throw ApiError.conflict('You already have a shop', 'SHOP_EXISTS');
 
-  return withTransaction(async (session) => {
-    // Go live immediately so the owner's storefront is reachable and appears on
-    // the public /shops directory without waiting for a separate approval step.
-    const shop = await provisionShop(session, user, input.shopName, { phone: input.phone, status: ShopStatus.ACTIVE });
-    user.shopId = shop._id;
-    await user.save({ session });
-    return shop;
-  });
+  // Go live immediately so the owner's storefront is reachable and appears on
+  // the public /shops directory without waiting for a separate approval step.
+  const shop = await withTransaction((session) =>
+    provisionShop(session, { _id: user.id }, input.shopName, { phone: input.phone, status: ShopStatus.ACTIVE }),
+  );
+
+  try {
+    await userRepo.update(user.id, { shopId: shop._id.toString() });
+  } catch (err) {
+    // The owner exists and is fine; it is the shop that would be orphaned —
+    // unreachable by its owner and holding the slug. Roll it back instead.
+    await Shop.deleteOne({ _id: shop._id }).catch(() => undefined);
+    throw err;
+  }
+  return shop;
 }
 
 export async function setShopStatus(id: string, status: ShopStatus): Promise<ShopDoc> {

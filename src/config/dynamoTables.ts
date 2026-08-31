@@ -139,7 +139,14 @@ export const TABLE_DEFS: TableDef[] = [
     logicalName: 'User',
     pk: { name: 'id', type: 'S' },
     sk: { name: 'sk', type: 'S' }, // literal "META"
-    gsis: [{ name: 'byEmail', pk: { name: 'email', type: 'S' } }],
+    gsis: [
+      { name: 'byEmail', pk: { name: 'email', type: 'S' } },
+      // Staff listing is shop-scoped (§22). Without this, listing a shop's users
+      // would need a Scan across every tenant's users — both a cost and an
+      // isolation hazard. Only set on shop-scoped users; SUPER_ADMIN/USER rows
+      // omit it, so they never appear in a shop's staff list.
+      { name: 'byShop', pk: { name: 'shopId', type: 'S' }, sk: { name: 'id', type: 'S' } },
+    ],
   },
   {
     logicalName: 'Shop',

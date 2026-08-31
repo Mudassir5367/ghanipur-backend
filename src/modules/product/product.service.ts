@@ -2,6 +2,7 @@ import { Product } from '../../models/product.model.js';
 import { Category } from '../../models/category.model.js';
 import { InventoryTransaction } from '../../models/inventoryTransaction.model.js';
 import { tenantRepository } from '../../repositories/tenantRepository.js';
+import * as userRepo from '../../repositories/dynamo/userRepository.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { slugify, uniqueSlug } from '../../utils/slug.js';
 import { toMinor } from '../../utils/money.js';
@@ -173,9 +174,21 @@ export async function getProductLedger(ctx: TenantContext, productId: string, qu
   await getProduct(ctx, productId); // ensures shop scope
   const { page, limit, skip } = parsePagination(query, '-occurredAt');
   const filter = { shopId: ctx.shopId, productId };
-  const [data, total] = await Promise.all([
-    InventoryTransaction.find(filter).sort({ occurredAt: -1 }).skip(skip).limit(limit).populate('performedBy', 'name'),
+  const [rows, total] = await Promise.all([
+    InventoryTransaction.find(filter).sort({ occurredAt: -1 }).skip(skip).limit(limit).lean(),
     InventoryTransaction.countDocuments(filter),
   ]);
+
+  // `performedBy` used to be populated from the Mongo users collection. Users now
+  // live in DynamoDB, so there is nothing to populate across — resolve the names
+  // explicitly instead. One lookup per distinct actor on the page, not per row.
+  const actorIds = [...new Set(rows.map((r) => r.performedBy?.toString()).filter((v): v is string => !!v))];
+  const actors = await Promise.all(actorIds.map((id) => userRepo.findById(id)));
+  const nameById = new Map(actors.filter((u) => u !== null).map((u) => [u.id, u.name]));
+
+  const data = rows.map((row) => {
+    const id = row.performedBy?.toString();
+    return { ...row, performedBy: id ? { _id: id, name: nameById.get(id) ?? null } : null };
+  });
   return { data, meta: buildPageMeta(page, limit, total) };
 }

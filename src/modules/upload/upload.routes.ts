@@ -11,7 +11,7 @@ import { asyncHandler, ok } from '../../utils/http.js';
 import { ApiError } from '../../utils/ApiError.js';
 import { Permission } from '../../constants/permissions.js';
 import { env } from '../../config/env.js';
-import { User } from '../../models/user.model.js';
+import * as userRepo from '../../repositories/dynamo/userRepository.js';
 import { toPublic } from '../auth/auth.service.js';
 
 export const uploadDir = path.resolve(process.cwd(), env.UPLOAD_DIR);
@@ -81,8 +81,9 @@ uploadRouter.post(
     // Relative, same-origin URL — loads through the frontend proxy regardless of the
     // host the app is opened on (localhost, 127.0.0.1, LAN IP, …).
     const url = `/uploads/${req.file.filename}`;
-    const user = await User.findByIdAndUpdate(req.auth!.userId, { avatarUrl: url }, { new: true });
+    const user = await userRepo.findById(req.auth!.userId);
     if (!user) throw ApiError.notFound('User not found', 'USER_NOT_FOUND');
-    ok(res, { avatarUrl: url, user: toPublic(user) });
+    await userRepo.update(user.id, { avatarUrl: url });
+    ok(res, { avatarUrl: url, user: toPublic({ ...user, avatarUrl: url }) });
   }),
 );

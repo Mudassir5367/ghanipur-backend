@@ -6,7 +6,7 @@
 import { connectDatabase, disconnectDatabase } from '../config/db.js';
 import { env } from '../config/env.js';
 import { logger } from '../config/logger.js';
-import { User } from '../models/user.model.js';
+import * as userRepo from '../repositories/dynamo/userRepository.js';
 import { Shop, ShopStatus } from '../models/shop.model.js';
 import { ShopSettings } from '../models/shopSettings.model.js';
 import { Category } from '../models/category.model.js';
@@ -48,16 +48,21 @@ async function seed(): Promise<void> {
     ]);
     await Shop.deleteOne({ _id: existingShop._id });
   }
-  await User.deleteMany({ email: { $in: [superEmail, adminEmail] } });
+  // Users live in DynamoDB now, so the demo accounts are removed there — deleting
+  // the email guard too, or re-seeding would collide with the stale reservation.
+  for (const email of [superEmail, adminEmail]) {
+    const existing = await userRepo.findByEmail(email);
+    if (existing) await userRepo.hardDelete(existing.id, existing.email);
+  }
 
   const hash = await hashPassword(password);
   await ensureDefaultUnits();
   const litre = await Unit.findOne({ shopId: null, symbol: 'L' });
   const kg = await Unit.findOne({ shopId: null, symbol: 'kg' });
 
-  await User.create({ name: 'Super Admin', email: superEmail, passwordHash: hash, role: Role.SUPER_ADMIN });
+  await userRepo.create({ name: 'Super Admin', email: superEmail, passwordHash: hash, role: Role.SUPER_ADMIN });
 
-  const admin = await User.create({
+  const admin = await userRepo.create({
     name: 'Demo Owner',
     email: adminEmail,
     passwordHash: hash,
@@ -65,9 +70,8 @@ async function seed(): Promise<void> {
     phone: '03001112222',
   });
   // Provision the shop with default settings + starter categories (§3), then activate it.
-  const shop = await provisionShop(undefined, admin, 'Demo Dairy', { phone: '03001112222', status: ShopStatus.ACTIVE });
-  admin.shopId = shop._id;
-  await admin.save();
+  const shop = await provisionShop(undefined, { _id: admin.id }, 'Demo Dairy', { phone: '03001112222', status: ShopStatus.ACTIVE });
+  await userRepo.update(admin.id, { shopId: shop._id.toString() });
 
   // Products reference the seeded default categories (§62).
   const ctx = { shopId: shop._id.toString(), impersonated: false };
@@ -90,20 +94,20 @@ async function seed(): Promise<void> {
       sellingPriceMinor: toMinor(p.sell), purchaseCostMinor: toMinor(p.cost), minStock: p.min,
     });
     if (p.name === 'Buffalo Milk') buffaloMilkId = product._id.toString();
-    await recordMovement(ctx, { productId: product._id.toString(), type: InventoryTxnType.STOCK_IN, quantity: p.open, refType: RefType.PRODUCT, refId: product._id, performedBy: admin._id.toString(), note: 'Opening stock' });
+    await recordMovement(ctx, { productId: product._id.toString(), type: InventoryTxnType.STOCK_IN, quantity: p.open, refType: RefType.PRODUCT, refId: product._id, performedBy: admin.id, note: 'Opening stock' });
   }
 
   // Customers + a credit sale + a partial payment (exercises the real services — §62)
-  const aliHotel = await createCustomer(ctx, { name: 'Ali Hotel', phone: '03009998888', type: 'HOTEL' }, admin._id.toString());
-  await createCustomer(ctx, { name: 'Bilal Household', phone: '03007776666', type: 'HOUSEHOLD' }, admin._id.toString());
+  const aliHotel = await createCustomer(ctx, { name: 'Ali Hotel', phone: '03009998888', type: 'HOTEL' }, admin.id);
+  await createCustomer(ctx, { name: 'Bilal Household', phone: '03007776666', type: 'HOUSEHOLD' }, admin.id);
 
-  await createSale(ctx, { type: 'CASH', items: [{ productId: buffaloMilkId, quantity: 15 }] }, admin._id.toString());
-  await createSale(ctx, { type: 'CREDIT', customerId: aliHotel._id.toString(), items: [{ productId: buffaloMilkId, quantity: 30 }] }, admin._id.toString());
-  await recordPayment(ctx, { customerId: aliHotel._id.toString(), amount: 3000, method: 'CASH' }, admin._id.toString());
+  await createSale(ctx, { type: 'CASH', items: [{ productId: buffaloMilkId, quantity: 15 }] }, admin.id);
+  await createSale(ctx, { type: 'CREDIT', customerId: aliHotel._id.toString(), items: [{ productId: buffaloMilkId, quantity: 30 }] }, admin.id);
+  await recordPayment(ctx, { customerId: aliHotel._id.toString(), amount: 3000, method: 'CASH' }, admin.id);
 
   await Expense.create([
-    { shopId: shop._id, category: 'Rent', amountMinor: toMinor(50000), createdBy: admin._id },
-    { shopId: shop._id, category: 'Electricity', amountMinor: toMinor(35000), createdBy: admin._id },
+    { shopId: shop._id, category: 'Rent', amountMinor: toMinor(50000), createdBy: admin.id },
+    { shopId: shop._id, category: 'Electricity', amountMinor: toMinor(35000), createdBy: admin.id },
   ]);
 
   logger.info('✅ Seed complete');

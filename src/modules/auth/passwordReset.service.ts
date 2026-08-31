@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { User } from '../../models/user.model.js';
+import * as userRepo from '../../repositories/dynamo/userRepository.js';
 import { PasswordReset } from '../../models/passwordReset.model.js';
 import { hashPassword, hashToken, verifyTokenHash } from '../../services/token.service.js';
 import { sendOtpEmail } from '../../services/mailer.service.js';
@@ -18,7 +18,7 @@ const genResetToken = () => crypto.randomBytes(32).toString('hex');
  */
 export async function requestPasswordReset(emailRaw: string): Promise<{ devOtp?: string }> {
   const email = normalize(emailRaw);
-  const user = await User.findOne({ email });
+  const user = await userRepo.findByEmail(email);
   if (!user || !user.isActive) return {}; // stay silent — do not reveal (non-)existence
 
   // Resend cooldown: if a live (unverified) code was sent very recently, don't resend.
@@ -97,12 +97,13 @@ export async function resetPassword(emailRaw: string, resetToken: string, newPas
   const ok = await verifyTokenHash(pr.resetTokenHash, resetToken);
   if (!ok) throw invalid;
 
-  const user = await User.findOne({ email });
+  const user = await userRepo.findByEmail(email);
   if (!user) { await pr.deleteOne(); throw invalid; }
 
-  user.passwordHash = await hashPassword(newPassword);
-  user.refreshTokenHash = null; // revoke every existing session after a password change
-  await user.save();
+  await userRepo.update(user.id, {
+    passwordHash: await hashPassword(newPassword),
+    refreshTokenHash: null, // revoke every existing session after a password change
+  });
 
   await pr.deleteOne(); // single-use: the reset token/OTP can never be reused
 }
