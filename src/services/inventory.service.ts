@@ -14,7 +14,13 @@ export interface MovementInput {
   performedBy?: string | null;
   note?: string;
   occurredAt?: Date;
-  /** Allow stock to go below zero (default false for outflow types). */
+  /** Stock purchases: cost price per unit and supplier, kept on the ledger row. */
+  unitCostMinor?: number;
+  supplier?: string;
+  /**
+   * Allow stock to go below zero. Unset: outflow types are floored, ADJUSTMENT is not.
+   * Explicit `false` floors any negative delta, including a downward ADJUSTMENT.
+   */
   allowNegative?: boolean;
 }
 
@@ -71,7 +77,7 @@ export async function recordMovement(
 
   const delta = signedDelta(input.type, input.quantity);
   const isOutflow = delta < 0 && OUTFLOW_TYPES.includes(input.type);
-  const guardNegative = isOutflow && !input.allowNegative;
+  const guardNegative = (isOutflow && !input.allowNegative) || (delta < 0 && input.allowNegative === false);
 
   const balanceAfter = await productRepo.adjustStock(ctx.shopId, product.id, delta, {
     allowNegative: !guardNegative,
@@ -95,6 +101,8 @@ export async function recordMovement(
     performedBy: input.performedBy ?? null,
     note: input.note ?? '',
     occurredAt: input.occurredAt,
+    unitCostMinor: input.unitCostMinor,
+    supplier: input.supplier,
   });
 
   return {

@@ -10,7 +10,7 @@ import { toMinor } from '../../utils/money.js';
 import { parsePagination, paginateInMemory } from '../../utils/pagination.js';
 import { buildPageMeta } from '../../utils/http.js';
 import { assertUsableUnit } from '../unit/unit.service.js';
-import { recordMovement } from '../../services/inventory.service.js';
+import { recordMovement, undoMovements } from '../../services/inventory.service.js';
 import { InventoryTxnType, RefType } from '../../constants/inventory.js';
 import type { TenantContext } from '../../types/context.js';
 import type { CreateProductInput, UpdateProductInput, InventoryMovementInput } from './product.validators.js';
@@ -70,8 +70,31 @@ async function attachRefs(ctx: TenantContext, rows: productRepo.ProductRecord[])
       ...p,
       categoryId: cat ? { _id: cat.id, name: cat.name, slug: cat.slug } : p.categoryId,
       unitId: unit ? { _id: unit.id, name: unit.name, symbol: unit.symbol } : p.unitId,
+      // Average cost price across stock purchases — what sales are costed at.
+      avgCostMinor: productRepo.averageCostMinor(p),
     };
   });
+}
+
+/** Stock purchases: every Stock In, plus opening-stock corrections (which change the opening purchase). */
+function isPurchase(r: { type: string; refType: string; refId: string | null; productId: string }): boolean {
+  return r.type === InventoryTxnType.STOCK_IN
+    || (r.type === InventoryTxnType.ADJUSTMENT && r.refType === RefType.PRODUCT && r.refId === r.productId);
+}
+
+/**
+ * For a product created before purchase costing (no running totals yet): its
+ * earlier purchases, each costed at its recorded cost or else the product's Cost
+ * Price, so the first costed purchase averages in the history rather than
+ * ignoring it. Undefined for products that already keep totals.
+ */
+async function legacyPurchaseSeed(ctx: TenantContext, product: productRepo.ProductRecord) {
+  if (product.costBasisQty !== undefined) return undefined;
+  const rows = (await txnRepo.listByProduct(product.id)).filter((r) => r.shopId === ctx.shopId && isPurchase(r));
+  return {
+    qty: rows.reduce((s, r) => s + r.quantity, 0),
+    costMinor: rows.reduce((s, r) => s + Math.round(r.quantity * (r.unitCostMinor ?? product.purchaseCostMinor)), 0),
+  };
 }
 
 export async function createProduct(ctx: TenantContext, input: CreateProductInput, userId: string) {
@@ -95,6 +118,7 @@ export async function createProduct(ctx: TenantContext, input: CreateProductInpu
       unitValue: input.unitValue ?? 1,
       sellingPriceMinor: toMinor(input.sellingPrice),
       purchaseCostMinor: input.purchaseCost !== undefined ? toMinor(input.purchaseCost) : 0,
+      supplier: input.supplier ?? '',
       taxConfig: { rate: input.taxRate ?? 0, inclusive: input.taxInclusive ?? true },
       minStock: input.minStock ?? 0,
       trackInventory: input.trackInventory ?? true,
@@ -109,7 +133,8 @@ export async function createProduct(ctx: TenantContext, input: CreateProductInpu
     throw err;
   }
 
-  // Opening stock becomes the first ledger entry, keeping cache = ledger.
+  // Opening stock becomes the first ledger entry (keeping cache = ledger) and the
+  // first purchase: bought from the product's supplier at its Cost Price.
   if (input.openingStock && input.openingStock > 0 && (input.trackInventory ?? true)) {
     const moved = await recordMovement(ctx, {
       productId: product.id,
@@ -119,11 +144,38 @@ export async function createProduct(ctx: TenantContext, input: CreateProductInpu
       refId: product.id,
       performedBy: userId,
       note: 'Opening stock',
+      unitCostMinor: product.purchaseCostMinor,
+      supplier: product.supplier,
     });
-    if (!moved.skipped && moved.balanceAfter !== undefined) product.currentStock = moved.balanceAfter;
+    if (!moved.skipped && moved.balanceAfter !== undefined) {
+      const costMinor = Math.round(input.openingStock * product.purchaseCostMinor);
+      try {
+        await productRepo.addPurchaseCost(ctx.shopId, product.id, input.openingStock, costMinor);
+      } catch (err) {
+        if (moved.undo) await undoMovements(ctx, [moved.undo]);
+        throw err;
+      }
+      product.currentStock = moved.balanceAfter;
+      product.costBasisQty = input.openingStock;
+      product.costBasisMinor = costMinor;
+    }
   }
 
-  return product;
+  return { ...product, avgCostMinor: productRepo.averageCostMinor(product) };
+}
+
+/** Distinct supplier/vendor names already used by the shop, for suggestions in the forms. */
+export async function listSuppliers(ctx: TenantContext): Promise<string[]> {
+  const [products, stockIns] = await Promise.all([
+    productRepo.listByShop(ctx.shopId),
+    txnRepo.listByShopType(ctx.shopId, InventoryTxnType.STOCK_IN),
+  ]);
+  const byKey = new Map<string, string>();
+  for (const name of [...products.map((p) => p.supplier), ...stockIns.map((t) => t.supplier)]) {
+    const trimmed = name?.trim();
+    if (trimmed && !byKey.has(trimmed.toLowerCase())) byKey.set(trimmed.toLowerCase(), trimmed);
+  }
+  return [...byKey.values()].sort((a, b) => a.localeCompare(b));
 }
 
 export async function listProducts(
@@ -144,11 +196,36 @@ export async function listProducts(
   return { data: await attachRefs(ctx, data), meta: buildPageMeta(page, limit, total) };
 }
 
+/**
+ * Opening stock is not a product field — it is the ledger movement(s) the product
+ * references itself with (the initial STOCK_IN plus any later corrections).
+ * Conversions also use RefType.PRODUCT but point at the *other* product, so
+ * `refId === productId` isolates opening-stock rows.
+ *
+ * Reads the product's history from the base table (the same query the ledger
+ * screen uses) rather than the byRef index, so rows written before `refKey`
+ * existed are still counted.
+ */
+async function openingStockRows(ctx: TenantContext, productId: string) {
+  const rows = await txnRepo.listByProduct(productId);
+  return rows.filter((r) => r.shopId === ctx.shopId && r.refType === RefType.PRODUCT && r.refId === productId);
+}
+
+async function openingStockOf(ctx: TenantContext, productId: string): Promise<number> {
+  return (await openingStockRows(ctx, productId)).reduce((sum, r) => sum + r.quantity, 0);
+}
+
 export async function getProduct(ctx: TenantContext, id: string) {
   const product = await productRepo.findById(ctx.shopId, id);
   if (!product) throw ApiError.notFound('Product not found', 'PRODUCT_NOT_FOUND');
   const [withRefs] = await attachRefs(ctx, [product]);
   return withRefs!;
+}
+
+/** GET /products/:id — the product plus its ledger-derived opening stock (edit form). */
+export async function getProductDetail(ctx: TenantContext, id: string) {
+  const product = await getProduct(ctx, id);
+  return { ...product, openingStock: await openingStockOf(ctx, id) };
 }
 
 /** Map API money (rupees) fields onto stored *Minor fields. */
@@ -162,15 +239,78 @@ function priceFields(input: Partial<CreateProductInput>): Record<string, unknown
   return out;
 }
 
-export async function updateProduct(ctx: TenantContext, id: string, input: UpdateProductInput) {
+export async function updateProduct(ctx: TenantContext, id: string, input: UpdateProductInput, userId: string) {
   const existing = await productRepo.findById(ctx.shopId, id);
   if (!existing) throw ApiError.notFound('Product not found', 'PRODUCT_NOT_FOUND');
   if (input.categoryId) await assertCategory(ctx, input.categoryId);
   if (input.unitId) await assertUsableUnit(ctx, input.unitId);
 
-  const { sellingPrice: _s, purchaseCost: _p, taxRate: _tr, taxInclusive: _ti, ...rest } = input;
+  // openingStock is ledger-backed, never stored on the product row.
+  const { sellingPrice: _s, purchaseCost: _p, taxRate: _tr, taxInclusive: _ti, openingStock, ...rest } = input;
   const patch = { ...rest, ...priceFields(input) } as productRepo.ProductPatch;
-  return productRepo.update(ctx.shopId, id, patch);
+
+  // Correcting opening stock shifts current stock by the same difference. The ledger
+  // is append-only, so the original entry stays and a correction is added beside it.
+  let undo: Awaited<ReturnType<typeof recordMovement>>['undo'];
+  let basisChange: { qty: number; costMinor: number } | undefined;
+  if (openingStock !== undefined && existing.trackInventory) {
+    const rows = await openingStockRows(ctx, id);
+    const current = rows.reduce((sum, r) => sum + r.quantity, 0);
+    const delta = openingStock - current;
+    if (delta !== 0) {
+      // A changed opening stock can never exceed the stock actually available.
+      if (openingStock > existing.currentStock) {
+        throw ApiError.badRequest('This much stock is not available. Please add stock first.', 'OPENING_STOCK_NOT_AVAILABLE');
+      }
+      // The correction changes the opening purchase, so it is costed like it.
+      const openingUnitCost = rows.find((r) => r.type === InventoryTxnType.STOCK_IN)?.unitCostMinor ?? existing.purchaseCostMinor;
+      try {
+        const moved = await recordMovement(ctx, {
+          productId: id,
+          type: InventoryTxnType.ADJUSTMENT,
+          quantity: delta,
+          refType: RefType.PRODUCT,
+          refId: id,
+          performedBy: userId,
+          note: `Opening stock corrected from ${current} to ${openingStock}`,
+          allowNegative: false,
+          unitCostMinor: openingUnitCost,
+        });
+        undo = moved.undo;
+        // Products created before purchase costing have no totals to move yet; their
+        // first costed purchase reads this correction from the ledger instead.
+        if (!moved.skipped && existing.costBasisQty !== undefined) {
+          basisChange = { qty: delta, costMinor: Math.round(delta * openingUnitCost) };
+          try {
+            await productRepo.addPurchaseCost(ctx.shopId, id, basisChange.qty, basisChange.costMinor);
+          } catch (basisErr) {
+            if (undo) await undoMovements(ctx, [undo]);
+            throw basisErr;
+          }
+        }
+      } catch (err) {
+        if (err instanceof ApiError && err.code === 'INSUFFICIENT_STOCK') {
+          throw ApiError.badRequest(
+            `Opening stock can't go below ${current - existing.currentStock}: only ${existing.currentStock} is left in stock after sales and deliveries.`,
+            'OPENING_STOCK_TOO_LOW',
+          );
+        }
+        throw err;
+      }
+    }
+  }
+
+  try {
+    const updated = await productRepo.update(ctx.shopId, id, patch);
+    if (!updated) return updated;
+    const fresh = basisChange ? await productRepo.findById(ctx.shopId, id) : updated;
+    return { ...updated, ...(fresh ? { costBasisQty: fresh.costBasisQty, costBasisMinor: fresh.costBasisMinor } : {}), avgCostMinor: productRepo.averageCostMinor(fresh ?? updated) };
+  } catch (err) {
+    // Don't leave a stock or cost change behind a failed save.
+    if (basisChange) await productRepo.addPurchaseCost(ctx.shopId, id, -basisChange.qty, -basisChange.costMinor).catch(() => undefined);
+    if (undo) await undoMovements(ctx, [undo]);
+    throw err;
+  }
 }
 
 export async function deleteProduct(ctx: TenantContext, id: string, userId: string) {
@@ -187,6 +327,21 @@ export async function recordInventoryMovement(
   input: InventoryMovementInput,
   userId: string,
 ) {
+  // A Stock In is a purchase: record who supplied it and its cost price, and fold
+  // it into the product's average cost. Other movements (wastage, returns,
+  // adjustments) are not purchases and leave the average alone.
+  const isStockIn = input.type === InventoryTxnType.STOCK_IN;
+  let purchase: { unitCostMinor: number; seed?: { qty: number; costMinor: number } } | undefined;
+  if (isStockIn) {
+    const before = await productRepo.findById(ctx.shopId, productId);
+    if (!before) throw ApiError.notFound('Product not found', 'PRODUCT_NOT_FOUND');
+    purchase = {
+      unitCostMinor: input.unitCost !== undefined ? toMinor(input.unitCost) : before.purchaseCostMinor,
+      // Read before this purchase is written, so it isn't counted twice.
+      seed: await legacyPurchaseSeed(ctx, before),
+    };
+  }
+
   const result = await recordMovement(ctx, {
     productId,
     type: input.type,
@@ -194,11 +349,27 @@ export async function recordInventoryMovement(
     refType: RefType.MANUAL,
     performedBy: userId,
     note: input.note,
+    ...(purchase ? { unitCostMinor: purchase.unitCostMinor, supplier: input.supplier?.trim() || undefined } : {}),
   });
+
+  if (purchase && !result.skipped) {
+    const qty = Math.abs(input.quantity);
+    try {
+      await productRepo.addPurchaseCost(ctx.shopId, productId, qty, Math.round(qty * purchase.unitCostMinor), purchase.seed);
+    } catch (err) {
+      if (result.undo) await undoMovements(ctx, [result.undo]); // no stock without its cost
+      throw err;
+    }
+  }
+
   // The response carries the resulting stock alongside the movement — the shape
   // the inventory screen reads.
   const product = await productRepo.findById(ctx.shopId, productId);
-  return { movement: result, currentStock: product?.currentStock ?? 0 };
+  return {
+    movement: result,
+    currentStock: product?.currentStock ?? 0,
+    avgCostMinor: product ? productRepo.averageCostMinor(product) : 0,
+  };
 }
 
 export async function getProductLedger(ctx: TenantContext, productId: string, query: unknown) {

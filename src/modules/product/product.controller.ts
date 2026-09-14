@@ -21,8 +21,12 @@ export const list = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export const get = asyncHandler(async (req: Request, res: Response) => {
-  const product = await service.getProduct(ctx(req), req.params.id!);
+  const product = await service.getProductDetail(ctx(req), req.params.id!);
   ok(res, { product });
+});
+
+export const suppliers = asyncHandler(async (req: Request, res: Response) => {
+  ok(res, { suppliers: await service.listSuppliers(ctx(req)) });
 });
 
 export const suggestSku = asyncHandler(async (req: Request, res: Response) => {
@@ -37,7 +41,7 @@ export const create = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export const update = asyncHandler(async (req: Request, res: Response) => {
-  const product = await service.updateProduct(ctx(req), req.params.id!, req.body);
+  const product = await service.updateProduct(ctx(req), req.params.id!, req.body, req.auth!.userId);
   await recordAudit({ actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: ctx(req).shopId, action: 'PRODUCT_UPDATE', resource: 'Product', resourceId: req.params.id, ip: req.ip });
   ok(res, { product });
 });

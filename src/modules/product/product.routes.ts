@@ -15,6 +15,7 @@ productRouter.use(authenticate, resolveTenant);
 productRouter.get('/', authorize(Permission.PRODUCT_VIEW), controller.list);
 // Specific path before /:id so "sku" is not treated as an id.
 productRouter.get('/sku/suggest', authorize(Permission.PRODUCT_CREATE), controller.suggestSku);
+productRouter.get('/suppliers', authorize(Permission.PRODUCT_VIEW), controller.suppliers);
 productRouter.get('/:id', authorize(Permission.PRODUCT_VIEW), validate({ params: idParamSchema }), controller.get);
 productRouter.post('/', authorize(Permission.PRODUCT_CREATE), validate({ body: createProductSchema }), controller.create);
 productRouter.patch('/:id', authorize(Permission.PRODUCT_UPDATE), validate({ params: idParamSchema, body: updateProductSchema }), controller.update);

@@ -81,10 +81,21 @@ export const expenses = {
 
   async update(
     expense: ExpenseRecord,
-    patch: Partial<Pick<ExpenseRecord, 'category' | 'amountMinor' | 'method' | 'description' | 'isRecurring'>>,
+    patch: Partial<Pick<ExpenseRecord, 'category' | 'amountMinor' | 'method' | 'description' | 'isRecurring' | 'incurredAt'>>,
   ): Promise<ExpenseRecord> {
     const next: Record<string, unknown> = { ...patch, updatedAt: new Date().toISOString() };
     if (patch.category !== undefined) next.shopCategoryKey = compositeKey(expense.shopId, patch.category);
+
+    // The date is part of the sort key ("incurredAt#id"), so a new date means the
+    // row must move: write it under its new key (same id), then drop the old one.
+    if (patch.incurredAt !== undefined && patch.incurredAt !== expense.incurredAt) {
+      const { _id: _legacy, ...stored } = { ...expense, ...next } as ExpenseRecord;
+      const moved: ExpenseRecord = { ...stored, sk: timeKey(patch.incurredAt, expense.id) };
+      await putItem(EXPENSES, moved);
+      await deleteItem(EXPENSES, { shopId: expense.shopId, sk: expense.sk });
+      return withLegacyId(moved);
+    }
+
     await updateItem(EXPENSES, { shopId: expense.shopId, sk: expense.sk }, next);
     return withLegacyId({ ...expense, ...next } as ExpenseRecord);
   },
@@ -112,6 +123,10 @@ export interface ConversionRecord {
   sourceUnitPriceMinor: number;
   convertedUnitPriceMinor: number;
   totalValueMinor: number;
+  /** SWEET_MILK | YOGURT. Absent on records made before conversions were restricted. */
+  outputKind?: string;
+  /** The output product's unit (e.g. kg), which can differ from Milk's (L). */
+  targetUnitSymbol?: string;
   performedBy: string | null;
   createdAt: string;
 }

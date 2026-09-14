@@ -32,6 +32,17 @@ export const create = asyncHandler(async (req: Request, res: Response) => {
   created(res, { sale });
 });
 
+export const update = asyncHandler(async (req: Request, res: Response) => {
+  const before = await service.getSale(ctx(req), req.params.id!);
+  const sale = await service.updateSale(ctx(req), req.params.id!, req.body, req.auth!.userId);
+  await recordAudit({
+    actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: ctx(req).shopId,
+    action: 'SALE_UPDATE', resource: 'Sale', resourceId: req.params.id, ip: req.ip,
+    metadata: { from: { type: before.sale.type, totalMinor: before.sale.totalMinor }, to: { type: sale.type, totalMinor: sale.totalMinor } },
+  });
+  ok(res, { sale });
+});
+
 export const reverse = asyncHandler(async (req: Request, res: Response) => {
   const sale = await service.reverseSale(ctx(req), req.params.id!, req.auth!.userId);
   await recordAudit({ actorId: req.auth!.userId, actorRole: req.auth!.role, shopId: ctx(req).shopId, action: 'SALE_REVERSE', resource: 'Sale', resourceId: req.params.id, ip: req.ip });

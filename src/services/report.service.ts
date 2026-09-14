@@ -6,6 +6,8 @@ import * as unitRepo from '../repositories/dynamo/unitRepository.js';
 import * as deliveryRepo from '../repositories/dynamo/deliveryRepository.js';
 import * as txnRepo from '../repositories/dynamo/inventoryTransactionRepository.js';
 import * as shopRepo from '../repositories/dynamo/shopRepository.js';
+import { expenses } from '../repositories/dynamo/miscRepositories.js';
+import { ApiError } from '../utils/ApiError.js';
 import { DeliveryStatus } from '../repositories/dynamo/deliveryRepository.js';
 import { SaleType, SaleStatus } from '../constants/sales.js';
 import { InventoryTxnType } from '../constants/inventory.js';
@@ -197,6 +199,31 @@ async function inventorySnapshot(shopId: string) {
   };
 }
 
+/**
+ * Value of everything sold in the range — the "Today's Sales" figure.
+ *
+ * Completed sales (cash AND credit, at their total) plus non-cancelled deliveries
+ * made in the range, at their grand total. It is deliberately independent of
+ * payment: a credit sale's due is already inside its total (adding outstanding
+ * on top double-counts it), and a paid or part-paid delivery was still sold in
+ * full. So editing Cash ↔ Credit, receiving a payment, or paying a delivery later
+ * never moves this number; only what was sold (and cancellations) does.
+ */
+async function salesValue(shopId: string, range: DateRange) {
+  const [sales, deliveries] = await Promise.all([saleRepo.listByShop(shopId), deliveryRepo.listByShop(shopId)]);
+  const soldSales = sales.filter((s) => s.status === SaleStatus.COMPLETED && inRange(s.soldAt, range));
+  const soldDeliveries = deliveries.filter((d) => d.status !== DeliveryStatus.CANCELLED && inRange(d.createdAt, range));
+  const salesMinor = soldSales.reduce((acc, s) => acc + s.totalMinor, 0);
+  const deliveriesMinor = soldDeliveries.reduce((acc, d) => acc + d.grandTotalMinor, 0);
+  return {
+    totalMinor: salesMinor + deliveriesMinor,
+    salesMinor,
+    deliveriesMinor,
+    saleCount: soldSales.length,
+    deliveryCount: soldDeliveries.length,
+  };
+}
+
 /** Dues that arose from transactions dated within the range (today): sale dues + delivery dues. */
 async function outstandingInRange(shopId: string, range: DateRange): Promise<number> {
   const [sales, deliveries] = await Promise.all([
@@ -234,7 +261,14 @@ async function stockByUnit(shopId: string) {
  * sales minus cost of goods sold. COGS = Σ quantity × the product's current
  * purchase/cost price. Cancelled/reversed sales are excluded.
  */
-async function profitForRange(shopId: string, range?: DateRange) {
+interface ProfitEvent { at: string; revenueMinor: number; costMinor: number }
+
+/**
+ * Every revenue/cost contribution in the range, in a fixed order (sale lines, then
+ * deliveries). Gross profit for any period — the dashboard card, Profit & Loss and
+ * the daily net-profit breakdown — is summed from these, so they can never disagree.
+ */
+async function profitEvents(shopId: string, range?: DateRange): Promise<{ sales: ProfitEvent[]; deliveries: ProfitEvent[] }> {
   const [sales, deliveries, products] = await Promise.all([
     saleRepo.listByShop(shopId),
     deliveryRepo.listByShop(shopId),
@@ -245,22 +279,105 @@ async function profitForRange(shopId: string, range?: DateRange) {
   const relevant = sales.filter(
     (s) => s.status === SaleStatus.COMPLETED && (!range || inRange(s.soldAt, range)),
   );
-  const items = (await Promise.all(relevant.map((s) => saleRepo.listItems(s.id)))).flat();
-
-  const saleRevenue = items.reduce((s, i) => s + i.lineTotalMinor, 0);
-  const saleCost = items.reduce((s, i) => s + i.quantity * (costById.get(i.productId) ?? 0), 0);
+  const itemsPerSale = await Promise.all(relevant.map((s) => saleRepo.listItems(s.id)));
+  const saleEvents = relevant.flatMap((s, i) => (itemsPerSale[i] ?? []).map((item) => ({
+    at: s.soldAt,
+    revenueMinor: item.lineTotalMinor,
+    // Each line is costed at the average cost recorded when it was sold; lines sold
+    // before purchase costing have none and keep using the product's Cost Price.
+    costMinor: item.quantity * (item.unitCostMinor ?? costById.get(item.productId) ?? 0),
+  })));
 
   // Deliveries (goods sold on delivery — profit is realized regardless of payment).
   // Per-delivery profit = Selling (subtotal) − Cost (costPriceMinor).
-  const liveDeliveries = deliveries.filter(
-    (d) => d.status !== DeliveryStatus.CANCELLED && (!range || inRange(d.createdAt, range)),
-  );
-  const deliveryRevenue = liveDeliveries.reduce((s, d) => s + d.subtotalMinor, 0);
-  const deliveryCost = liveDeliveries.reduce((s, d) => s + d.costPriceMinor, 0);
+  const deliveryEvents = deliveries
+    .filter((d) => d.status !== DeliveryStatus.CANCELLED && (!range || inRange(d.createdAt, range)))
+    .map((d) => ({ at: d.createdAt, revenueMinor: d.subtotalMinor, costMinor: d.costPriceMinor }));
 
+  return { sales: saleEvents, deliveries: deliveryEvents };
+}
+
+/** Sums events exactly as the original per-source totals did (sales, then deliveries). */
+function sumProfit(events: { sales: ProfitEvent[]; deliveries: ProfitEvent[] }) {
+  const saleRevenue = events.sales.reduce((s, e) => s + e.revenueMinor, 0);
+  const saleCost = events.sales.reduce((s, e) => s + e.costMinor, 0);
+  const deliveryRevenue = events.deliveries.reduce((s, e) => s + e.revenueMinor, 0);
+  const deliveryCost = events.deliveries.reduce((s, e) => s + e.costMinor, 0);
   const revenueMinor = saleRevenue + deliveryRevenue;
   const costMinor = saleCost + deliveryCost;
   return { revenueMinor, costMinor, profitMinor: revenueMinor - costMinor };
+}
+
+async function profitForRange(shopId: string, range?: DateRange) {
+  return sumProfit(await profitEvents(shopId, range));
+}
+
+/** Expenditure recorded in the range (rent, electricity bill, employee pay, …). */
+async function expensesForRange(shopId: string, range: DateRange) {
+  const rows = (await expenses.listByShop(shopId)).filter((e) => inRange(e.incurredAt, range));
+  return { totalMinor: rows.reduce((s, e) => s + e.amountMinor, 0), count: rows.length };
+}
+
+/** YYYY-MM-DD of an instant in the shop's timezone. */
+function localDay(at: string | Date, timeZone: string): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(at));
+}
+
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+const MAX_DAYS = 92;
+
+/**
+ * Daily-wise Net Profit between two shop-local dates (inclusive; default the last
+ * 30 days): per day, gross profit (same calculation as Today's Profit) minus that
+ * day's expenditure.
+ */
+export async function netProfitDaily(ctx: TenantContext, fromStr?: string, toStr?: string) {
+  const tz = await shopTimezone(ctx.shopId);
+  const today = localDay(new Date(), tz);
+  const to = toStr ?? today;
+  const shift = (day: string, n: number) => {
+    const d = new Date(`${day}T12:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  };
+  const from = fromStr ?? shift(to, -29);
+  if (!DAY_RE.test(from) || !DAY_RE.test(to)) throw ApiError.badRequest('Dates must be YYYY-MM-DD', 'INVALID_DATE');
+  if (from > to) throw ApiError.badRequest('"from" must not be after "to"', 'INVALID_RANGE');
+
+  const days: string[] = [];
+  for (let d = from; d <= to; d = shift(d, 1)) {
+    days.push(d);
+    if (days.length > MAX_DAYS) throw ApiError.badRequest(`Choose at most ${MAX_DAYS} days`, 'RANGE_TOO_LONG');
+  }
+
+  const range: DateRange = { start: dayRange(from, tz).start, end: dayRange(to, tz).end };
+  const [events, allExpenses] = await Promise.all([profitEvents(ctx.shopId, range), expenses.listByShop(ctx.shopId)]);
+  const expenseRows = allExpenses.filter((e) => inRange(e.incurredAt, range));
+
+  const rows = days.map((date) => {
+    const onDay = (e: { at: string }) => localDay(e.at, tz) === date;
+    const profit = sumProfit({ sales: events.sales.filter(onDay), deliveries: events.deliveries.filter(onDay) });
+    const dayExpenses = expenseRows.filter((e) => localDay(e.incurredAt, tz) === date);
+    const expensesMinor = dayExpenses.reduce((s, e) => s + e.amountMinor, 0);
+    return {
+      date,
+      ...profit,
+      expensesMinor,
+      expenseCount: dayExpenses.length,
+      netProfitMinor: profit.profitMinor - expensesMinor,
+    };
+  }).reverse(); // newest first
+
+  const totals = rows.reduce(
+    (acc, r) => ({
+      profitMinor: acc.profitMinor + r.profitMinor,
+      expensesMinor: acc.expensesMinor + r.expensesMinor,
+      netProfitMinor: acc.netProfitMinor + r.netProfitMinor,
+    }),
+    { profitMinor: 0, expensesMinor: 0, netProfitMinor: 0 },
+  );
+
+  return { from, to, days: rows, totals };
 }
 
 /** Profit & Loss across all products: all-time plus daily / weekly / monthly windows. */
@@ -296,7 +413,7 @@ async function deliveryCount(shopId: string, range: DateRange): Promise<number> 
 export async function dashboard(ctx: TenantContext, rangeKey?: string) {
   const tz = await shopTimezone(ctx.shopId);
   const range = namedRange(rangeKey, tz);
-  const [sales, payments, outstanding, todayOutstanding, products, inventory, deliveries, stockUnits] =
+  const [sales, payments, outstanding, todayOutstanding, products, inventory, deliveries, stockUnits, soldValue, profit, spent] =
     await Promise.all([
       salesTotals(ctx.shopId, range),
       paymentsTotal(ctx.shopId, range),
@@ -306,11 +423,19 @@ export async function dashboard(ctx: TenantContext, rangeKey?: string) {
       inventorySnapshot(ctx.shopId),
       deliveryCount(ctx.shopId, range),
       stockByUnit(ctx.shopId),
+      salesValue(ctx.shopId, range),
+      profitForRange(ctx.shopId, range),
+      expensesForRange(ctx.shopId, range),
     ]);
   const qtySold = products.reduce((s, p) => s + p.qty, 0);
   return {
     range: rangeKey ?? 'today',
     sales,
+    salesValue: soldValue, // "Today's Sales": sales + deliveries sold, independent of payment
+    profitMinor: profit.profitMinor, // gross profit (same figure as the Profit card)
+    expenses: spent, // today's expenditure: { totalMinor, count }
+    netProfitMinor: profit.profitMinor - spent.totalMinor, // Net Profit = profit − expenditure
+
     paymentsReceivedMinor: payments,
     outstandingMinor: outstanding,
     todayOutstandingMinor: todayOutstanding, // today's dues only (not the all-time balance)

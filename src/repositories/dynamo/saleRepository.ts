@@ -56,6 +56,9 @@ export interface SaleRecord {
   soldAt: string;
   reversalOf: string | null;
   cancelledAt: string | null;
+  /** Set when a confirmed sale is corrected (absent on never-edited sales). */
+  editedAt?: string | null;
+  editedBy?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -72,6 +75,8 @@ export interface SaleItemRecord {
   unitId: string;
   unitPriceMinor: number;
   lineTotalMinor: number;
+  /** Average cost per unit when sold (profit uses it). Absent on lines sold before purchase costing. */
+  unitCostMinor?: number;
   createdAt: string;
 }
 
@@ -181,6 +186,30 @@ export async function update(shopId: string, sale: SaleRecord, patch: SalePatch)
   return withLegacyId({ ...sale, ...next });
 }
 
+/** Everything a correction of a confirmed sale may change (soldAt/code/sk never move). */
+export type SaleCorrection = Pick<
+  SaleRecord,
+  'customerId' | 'customerPhone' | 'type' | 'subtotalMinor' | 'taxMinor' | 'totalMinor' | 'paidMinor' | 'dueMinor' | 'paymentMethod' | 'note'
+> & { editedBy: string | null };
+
+/**
+ * Applies a correction. customerId and type are also GSI partition keys
+ * (byCustomer / byType), so their composite keys are rewritten with them —
+ * otherwise the sale would keep appearing under its old customer or type.
+ */
+export async function applyCorrection(sale: SaleRecord, c: SaleCorrection): Promise<SaleRecord> {
+  const now = new Date().toISOString();
+  const next = {
+    ...c,
+    shopCustomerKey: compositeKey(sale.shopId, c.customerId ?? WALKIN),
+    shopTypeKey: compositeKey(sale.shopId, c.type),
+    editedAt: now,
+    updatedAt: now,
+  };
+  await updateItem(SALES, { shopId: sale.shopId, sk: sale.sk }, next);
+  return withLegacyId({ ...sale, ...next });
+}
+
 /** Hard delete — compensation for a failed multi-write, and test teardown. */
 export async function hardDelete(sale: Pick<SaleRecord, 'shopId' | 'sk' | 'code'>): Promise<void> {
   await deleteItem(SALES, { shopId: sale.shopId, sk: sale.sk });
@@ -198,6 +227,7 @@ export interface CreateSaleItemInput {
   unitId: string;
   unitPriceMinor: number;
   lineTotalMinor: number;
+  unitCostMinor?: number;
 }
 
 export async function addItem(input: CreateSaleItemInput): Promise<SaleItemRecord> {
@@ -214,6 +244,7 @@ export async function addItem(input: CreateSaleItemInput): Promise<SaleItemRecor
     lineTotalMinor: input.lineTotalMinor,
     createdAt: new Date().toISOString(),
   };
+  if (input.unitCostMinor !== undefined) record.unitCostMinor = input.unitCostMinor;
   await putItem(SALE_ITEMS, record);
   return withLegacyId(record);
 }
@@ -231,6 +262,11 @@ export async function listItemsByProduct(shopId: string, productId: string): Pro
     { indexName: 'byProduct' },
   );
   return rows.map((r) => withLegacyId(r));
+}
+
+/** Removes one line (used when a confirmed sale's lines are corrected). */
+export async function removeItem(saleId: string, id: string): Promise<void> {
+  await deleteItem(SALE_ITEMS, { saleId, id });
 }
 
 export async function deleteItems(saleId: string): Promise<void> {
