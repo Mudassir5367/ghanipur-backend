@@ -37,10 +37,10 @@ export const OUTFLOW_TYPES: InventoryTxnType[] = [
 ];
 
 /**
- * Milk → derived product yield. 100 units of milk produce 96 units of the converted
+ * Milk → derived product yield. 100 units of milk produce 92 units of the converted
  * product (Sweet Milk, Yogurt, …). Single source of truth for the whole app.
  */
-export const CONVERSION_RATE = 0.96;
+export const CONVERSION_RATE = 0.92;
 
 /**
  * Convert a transaction type + magnitude into a signed stock delta.

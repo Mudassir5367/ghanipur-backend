@@ -40,9 +40,9 @@ export function conversionRole(name: string, categoryName = ''): ConversionRole 
 
 /**
  * The conversion cost calculation (unchanged). Converting `quantity` of Milk
- * priced at `sourceUnitPriceMinor` at the fixed yield (CONVERSION_RATE = 0.96,
- * i.e. 96 from every 100):
- *  - converted quantity = quantity × 0.96
+ * priced at `sourceUnitPriceMinor` at the fixed yield (CONVERSION_RATE = 0.92,
+ * i.e. 92 from every 100):
+ *  - converted quantity = quantity × 0.92
  *  - converted unit price = proportional, so total value is preserved
  *    (quantity × sourcePrice == convertedQty × convertedPrice)
  * The converted unit price is a cost price for reference only — it is recorded
@@ -87,7 +87,7 @@ export async function conversionOptions(ctx: TenantContext) {
 
 /**
  * Convert Milk into Sweet Milk or Yogurt: deduct the entered Milk quantity from
- * Milk stock, add quantity × 0.96 to the output's stock, and record the
+ * Milk stock, add quantity × 0.92 to the output's stock, and record the
  * conversion with its cost for reference. No product price is changed.
  *
  * The Milk deduction is stock-guarded (can't convert more than you have); if any
@@ -142,7 +142,7 @@ export async function createConversion(ctx: TenantContext, input: CreateConversi
     });
     if (out.undo) undos.push(out.undo);
 
-    // Add the 96% yield to the output product.
+    // Add the 92% yield to the output product.
     const inMove = await recordMovement(ctx, {
       productId: target.id,
       type: InventoryTxnType.CONVERSION_IN,

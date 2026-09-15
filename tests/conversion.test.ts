@@ -35,30 +35,30 @@ describe('Conversion (Milk → Sweet Milk / Yogurt)', () => {
     const { owner, milk, sweet, yogurt } = await setup();
     const res = await request(app).get('/api/v1/conversions/options').set(auth(owner.token));
     expect(res.status).toBe(200);
-    expect(res.body.data.rate).toBe(0.96);
+    expect(res.body.data.rate).toBe(0.92);
     expect(res.body.data.milk.map((p: { _id: string }) => p._id)).toEqual([milk]);
     expect(res.body.data.outputs.SWEET_MILK.map((p: { _id: string }) => p._id)).toEqual([sweet]);
     expect(res.body.data.outputs.YOGURT.map((p: { _id: string }) => p._id)).toEqual([yogurt]);
   });
 
-  it('deducts the entered Milk, adds 96% to the output, and changes no price', async () => {
+  it('deducts the entered Milk, adds 92% to the output, and changes no price', async () => {
     const { owner, milk, yogurt } = await setup();
     const res = await convert(owner, { sourceProductId: milk, targetProductId: yogurt, quantity: 100 });
     expect(res.status).toBe(201);
 
     const c = res.body.data.conversion;
     expect(c.sourceQuantity).toBe(100);
-    expect(c.convertedQuantity).toBe(96);
+    expect(c.convertedQuantity).toBe(92);
     expect(c.outputKind).toBe('YOGURT');
     expect(c.unitSymbol).toBe('L');
     expect(c.targetUnitSymbol).toBe('kg');
-    // Existing cost calculation: 100 × Rs 250 = Rs 25,000 over 96 → Rs 260.42 each.
+    // Existing cost calculation: 100 × Rs 250 = Rs 25,000 over 92 → Rs 271.74 each.
     expect(c.totalValueMinor).toBe(2500000);
-    expect(c.convertedUnitPriceMinor).toBe(Math.round(2500000 / 96));
+    expect(c.convertedUnitPriceMinor).toBe(Math.round(2500000 / 92));
 
     const [m, y] = [await productOf(owner, milk), await productOf(owner, yogurt)];
     expect(m.currentStock).toBe(50);
-    expect(y.currentStock).toBe(106);
+    expect(y.currentStock).toBe(102);
     // The cost is reference only: no selling or purchase price moved.
     expect(y.sellingPriceMinor).toBe(30000);
     expect(y.purchaseCostMinor).toBe(24000);
@@ -70,7 +70,7 @@ describe('Conversion (Milk → Sweet Milk / Yogurt)', () => {
     const res = await convert(owner, { sourceProductId: milk, targetProductId: sweet, quantity: 50 });
     expect(res.status).toBe(201);
     expect(res.body.data.conversion.outputKind).toBe('SWEET_MILK');
-    expect((await productOf(owner, sweet)).currentStock).toBe(48);
+    expect((await productOf(owner, sweet)).currentStock).toBe(46);
     expect((await productOf(owner, sweet)).sellingPriceMinor).toBe(28000);
   });
 
@@ -119,7 +119,7 @@ describe('Conversion (Milk → Sweet Milk / Yogurt)', () => {
     expect(summary.body.data.count).toBe(2);
     expect(summary.body.data.milkUsed).toEqual([{ unitSymbol: 'L', quantity: 125 }]);
     const produced = Object.fromEntries(summary.body.data.produced.map((p: { outputKind: string; quantity: number }) => [p.outputKind, p.quantity]));
-    expect(produced).toEqual({ YOGURT: 96, SWEET_MILK: 24 });
+    expect(produced).toEqual({ YOGURT: 92, SWEET_MILK: 23 });
     expect(summary.body.data.totalCostMinor).toBe(125 * 25000);
 
     const bad = await request(app).get('/api/v1/conversions?from=not-a-date').set(auth(owner.token));
