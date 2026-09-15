@@ -32,6 +32,9 @@ export interface InventoryTransactionRecord {
   refId: string | null;
   performedBy: string | null;
   note: string;
+  /** Stock purchases only: cost price per unit and who it was bought from. */
+  unitCostMinor?: number | null;
+  supplier?: string;
   occurredAt: string;
   createdAt: string;
 }
@@ -49,6 +52,8 @@ export interface CreateMovement {
   refId?: string | null;
   performedBy?: string | null;
   note?: string;
+  unitCostMinor?: number | null;
+  supplier?: string;
   occurredAt?: Date;
 }
 
@@ -73,6 +78,9 @@ export async function append(input: CreateMovement): Promise<InventoryTransactio
     occurredAt,
     createdAt: new Date().toISOString(),
   };
+  // Only purchases carry these; other movements stay exactly as before.
+  if (input.unitCostMinor !== undefined && input.unitCostMinor !== null) record.unitCostMinor = input.unitCostMinor;
+  if (input.supplier) record.supplier = input.supplier;
   await putItem(TXNS, record);
   return withLegacyId(record);
 }

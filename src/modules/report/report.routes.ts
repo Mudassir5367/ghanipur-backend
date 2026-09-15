@@ -28,6 +28,11 @@ reportRouter.get('/profit-loss', authorize(Permission.REPORT_VIEW), resolveTenan
   ok(res, await reports.profitLoss(ctx(req)));
 }));
 
+// Daily-wise Net Profit (profit − expenditure). ?from=YYYY-MM-DD&to=YYYY-MM-DD, default last 30 days.
+reportRouter.get('/net-profit', authorize(Permission.REPORT_VIEW), resolveTenant, asyncHandler(async (req: Request, res: Response) => {
+  ok(res, await reports.netProfitDaily(ctx(req), req.query.from as string | undefined, req.query.to as string | undefined));
+}));
+
 reportRouter.get('/daily', authorize(Permission.REPORT_VIEW), resolveTenant, asyncHandler(async (req: Request, res: Response) => {
   ok(res, await reports.daily(ctx(req), req.query.date as string | undefined));
 }));

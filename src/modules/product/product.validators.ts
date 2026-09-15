@@ -23,12 +23,12 @@ export const createProductSchema = z.object({
   deliveryAvailable: z.boolean().optional(),
   status: z.nativeEnum(ProductStatus).optional(),
   openingStock: z.number().min(0).optional(),
+  supplier: z.string().trim().max(80).optional(), // supplier/vendor (also recorded on opening stock)
 });
 export type CreateProductInput = z.infer<typeof createProductSchema>;
 
-export const updateProductSchema = createProductSchema
-  .omit({ openingStock: true })
-  .partial();
+// openingStock is editable: the service corrects it through the stock ledger.
+export const updateProductSchema = createProductSchema.partial();
 export type UpdateProductInput = z.infer<typeof updateProductSchema>;
 
 export const listProductsQuerySchema = z.object({
@@ -43,5 +43,9 @@ export const inventoryMovementSchema = z.object({
   type: z.enum([InventoryTxnType.STOCK_IN, InventoryTxnType.WASTAGE, InventoryTxnType.ADJUSTMENT, InventoryTxnType.RETURN]),
   quantity: z.number().refine((n) => n !== 0, 'Quantity cannot be zero'),
   note: z.string().max(300).optional(),
+  // Stock in (a purchase) only: who it was bought from and the cost price per unit.
+  // Optional for older clients; a stock-in without a cost is costed at the product's Cost Price.
+  supplier: z.string().trim().max(80).optional(),
+  unitCost: money.optional(),
 });
 export type InventoryMovementInput = z.infer<typeof inventoryMovementSchema>;

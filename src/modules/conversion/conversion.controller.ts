@@ -11,8 +11,16 @@ function ctx(req: Request): TenantContext {
 }
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
-  const { data, meta } = await service.listConversions(ctx(req), req.query);
+  const { data, meta } = await service.listConversions(ctx(req), req.query as Record<string, unknown>);
   ok(res, data, 200, meta);
+});
+
+export const options = asyncHandler(async (req: Request, res: Response) => {
+  ok(res, await service.conversionOptions(ctx(req)));
+});
+
+export const summary = asyncHandler(async (req: Request, res: Response) => {
+  ok(res, await service.conversionSummary(ctx(req), req.query as Record<string, unknown>));
 });
 
 export const create = asyncHandler(async (req: Request, res: Response) => {

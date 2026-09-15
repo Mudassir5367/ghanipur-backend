@@ -29,6 +29,9 @@ export const createSaleSchema = z.object({
 });
 export type CreateSaleInput = z.infer<typeof createSaleSchema>;
 
+// Correcting a confirmed sale takes the full sale again — every field is editable.
+export const updateSaleSchema = createSaleSchema;
+
 export const listSalesQuerySchema = z.object({
   type: z.nativeEnum(SaleType).optional(),
   status: z.enum(['COMPLETED', 'CANCELLED']).optional(),

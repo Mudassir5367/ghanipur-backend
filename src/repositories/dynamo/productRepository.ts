@@ -13,6 +13,8 @@ import {
   type GuardSpec,
 } from './base.js';
 import { newId } from './id.js';
+import { UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { ddb } from '../../config/dynamo.js';
 
 /**
  * DynamoDB-backed Product store, replacing the Mongoose `Product` model.
@@ -42,8 +44,18 @@ export interface ProductRecord {
   images: string[];
   unitId: string;
   unitValue: number;
+  /** The product's Cost Price as entered (deliveries default to it; unchanged by purchases). */
   purchaseCostMinor: number;
   sellingPriceMinor: number;
+  /** Default supplier/vendor for the product. */
+  supplier?: string;
+  /**
+   * Running totals over stock purchases (opening stock + Add Stock), for the
+   * quantity-weighted average cost. Absent on products created before purchase
+   * costing existed — see averageCostMinor and addPurchaseCost.
+   */
+  costBasisQty?: number;
+  costBasisMinor?: number;
   taxConfig: { rate: number; inclusive: boolean };
   minStock: number;
   currentStock: number;
@@ -136,6 +148,7 @@ export interface CreateProductInput {
   unitId: string;
   sellingPriceMinor: number;
   purchaseCostMinor?: number;
+  supplier?: string;
   description?: string;
   images?: string[];
   unitValue?: number;
@@ -170,6 +183,10 @@ export async function create(input: CreateProductInput): Promise<ProductRecord> 
     unitValue: input.unitValue ?? 1,
     purchaseCostMinor: input.purchaseCostMinor ?? 0,
     sellingPriceMinor: input.sellingPriceMinor,
+    supplier: input.supplier ?? '',
+    // No purchases yet; opening stock is added through addPurchaseCost.
+    costBasisQty: 0,
+    costBasisMinor: 0,
     taxConfig: input.taxConfig ?? { rate: 0, inclusive: true },
     minStock: input.minStock ?? 0,
     currentStock: 0,
@@ -188,8 +205,56 @@ export async function create(input: CreateProductInput): Promise<ProductRecord> 
 }
 
 export type ProductPatch = Partial<
-  Omit<ProductRecord, 'shopId' | 'id' | '_id' | 'slug' | 'sku' | 'currentStock' | 'createdAt'>
+  Omit<ProductRecord, 'shopId' | 'id' | '_id' | 'slug' | 'sku' | 'currentStock' | 'costBasisQty' | 'costBasisMinor' | 'createdAt'>
 >;
+
+/**
+ * Average cost price across stock purchases, weighted by quantity. Falls back to
+ * the entered Cost Price when there are no costed purchases — which also keeps
+ * products created before purchase costing exactly as they were.
+ */
+export function averageCostMinor(p: Pick<ProductRecord, 'purchaseCostMinor' | 'costBasisQty' | 'costBasisMinor'>): number {
+  const qty = p.costBasisQty ?? 0;
+  return qty > 0 ? Math.round((p.costBasisMinor ?? 0) / qty) : p.purchaseCostMinor;
+}
+
+/**
+ * Adds a purchase (quantity and its total cost) to the running totals, atomically.
+ *
+ * `seed` is for a product created before purchase costing: its earlier purchases
+ * are folded in exactly once. The seeded write only succeeds while the totals are
+ * still absent, so two concurrent first purchases cannot both seed — the loser
+ * falls back to a plain ADD.
+ */
+export async function addPurchaseCost(
+  shopId: string,
+  id: string,
+  qty: number,
+  costMinor: number,
+  seed?: { qty: number; costMinor: number },
+): Promise<void> {
+  if (seed) {
+    try {
+      await ddb.send(new UpdateCommand({
+        TableName: PRODUCTS,
+        Key: { shopId, id },
+        UpdateExpression: 'SET costBasisQty = :q, costBasisMinor = :c',
+        ConditionExpression: 'attribute_exists(id) AND attribute_not_exists(costBasisQty)',
+        ExpressionAttributeValues: { ':q': seed.qty + qty, ':c': seed.costMinor + costMinor },
+      }));
+      return;
+    } catch (err) {
+      if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
+    }
+  }
+  await ddb.send(new UpdateCommand({
+    TableName: PRODUCTS,
+    Key: { shopId, id },
+    UpdateExpression: 'ADD costBasisQty :q, costBasisMinor :c',
+    ConditionExpression: 'attribute_exists(id)',
+    ExpressionAttributeValues: { ':q': qty, ':c': costMinor },
+  }));
+}
 
 export async function update(shopId: string, id: string, patch: ProductPatch): Promise<ProductRecord | null> {
   const current = await findById(shopId, id);

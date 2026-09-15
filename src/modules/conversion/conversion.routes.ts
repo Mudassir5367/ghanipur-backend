@@ -11,5 +11,7 @@ export const conversionRouter = Router();
 
 conversionRouter.use(authenticate, resolveTenant);
 
-conversionRouter.get('/', authorize(Permission.INVENTORY_VIEW), controller.list);
+conversionRouter.get('/', authorize(Permission.INVENTORY_VIEW), controller.list); // ?from&to for history periods
+conversionRouter.get('/options', authorize(Permission.INVENTORY_VIEW), controller.options);
+conversionRouter.get('/summary', authorize(Permission.INVENTORY_VIEW), controller.summary);
 conversionRouter.post('/', authorize(Permission.INVENTORY_ADJUST), validate({ body: createConversionSchema }), controller.create);

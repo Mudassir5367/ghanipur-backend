@@ -100,6 +100,103 @@ describe('Products & inventory', () => {
     expect(res.body.code).toBe('INSUFFICIENT_STOCK');
   });
 
+  it('returns the ledger-derived opening stock with a product', async () => {
+    const owner = await registerShop(app);
+    const productId = await makeProduct(owner); // opening 46
+    const res = await request(app).get(`/api/v1/products/${productId}`).set(auth(owner.token));
+    expect(res.body.data.product.openingStock).toBe(46);
+  });
+
+  it('corrects opening stock through the ledger, shifting current stock by the difference', async () => {
+    const owner = await registerShop(app);
+    const productId = await makeProduct(owner); // opening 46, stock 46
+    await request(app).post(`/api/v1/products/${productId}/inventory`).set(auth(owner.token)).send({ type: 'STOCK_IN', quantity: 20 }); // stock 66
+
+    const up = await request(app).patch(`/api/v1/products/${productId}`).set(auth(owner.token)).send({ openingStock: 60 });
+    expect(up.status).toBe(200);
+    let detail = await request(app).get(`/api/v1/products/${productId}`).set(auth(owner.token));
+    expect(detail.body.data.product.openingStock).toBe(60);
+    expect(detail.body.data.product.currentStock).toBe(80);
+
+    const down = await request(app).patch(`/api/v1/products/${productId}`).set(auth(owner.token)).send({ openingStock: 40 });
+    expect(down.status).toBe(200);
+    detail = await request(app).get(`/api/v1/products/${productId}`).set(auth(owner.token));
+    expect(detail.body.data.product.openingStock).toBe(40);
+    expect(detail.body.data.product.currentStock).toBe(60);
+
+    // Append-only: the original entry stays, each correction is its own ADJUSTMENT.
+    const ledger = await request(app).get(`/api/v1/products/${productId}/inventory`).set(auth(owner.token));
+    const types = ledger.body.data.map((t: { type: string }) => t.type).sort();
+    expect(types).toEqual(['ADJUSTMENT', 'ADJUSTMENT', 'STOCK_IN', 'STOCK_IN']);
+  });
+
+  it('will not set opening stock above the stock available', async () => {
+    const owner = await registerShop(app);
+    const productId = await makeProduct(owner); // opening 46, stock 46
+
+    const res = await request(app).patch(`/api/v1/products/${productId}`).set(auth(owner.token)).send({ openingStock: 47, sellingPrice: 999 });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('OPENING_STOCK_NOT_AVAILABLE');
+    expect(res.body.message).toBe('This much stock is not available. Please add stock first.');
+
+    const unchanged = await request(app).get(`/api/v1/products/${productId}`).set(auth(owner.token));
+    expect(unchanged.body.data.product.openingStock).toBe(46);
+    expect(unchanged.body.data.product.currentStock).toBe(46);
+    expect(unchanged.body.data.product.sellingPriceMinor).toBe(25000); // nothing else saved either
+
+    // Unchanged opening stock is not re-validated, so a product whose stock has
+    // since been sold down can still have its other details edited.
+    await request(app).post(`/api/v1/products/${productId}/inventory`).set(auth(owner.token)).send({ type: 'WASTAGE', quantity: 30 }); // stock 16
+    const other = await request(app).patch(`/api/v1/products/${productId}`).set(auth(owner.token)).send({ openingStock: 46, sellingPrice: 260 });
+    expect(other.status).toBe(200);
+  });
+
+  it('will not lower opening stock below what has already been used', async () => {
+    const owner = await registerShop(app);
+    const productId = await makeProduct(owner); // opening 46
+    await request(app).post(`/api/v1/products/${productId}/inventory`).set(auth(owner.token)).send({ type: 'WASTAGE', quantity: 40 }); // stock 6
+
+    const tooLow = await request(app).patch(`/api/v1/products/${productId}`).set(auth(owner.token)).send({ openingStock: 3, sellingPrice: 999 });
+    expect(tooLow.status).toBe(400);
+    expect(tooLow.body.code).toBe('OPENING_STOCK_TOO_LOW');
+    const unchanged = await request(app).get(`/api/v1/products/${productId}`).set(auth(owner.token));
+    expect(unchanged.body.data.product.currentStock).toBe(6);
+    expect(unchanged.body.data.product.openingStock).toBe(46);
+    expect(unchanged.body.data.product.sellingPriceMinor).toBe(25000); // the rejected save changed nothing
+
+    // At the floor (40 used) — with enough stock available for the new value.
+    await request(app).post(`/api/v1/products/${productId}/inventory`).set(auth(owner.token)).send({ type: 'STOCK_IN', quantity: 40 }); // stock 46
+    const atFloor = await request(app).patch(`/api/v1/products/${productId}`).set(auth(owner.token)).send({ openingStock: 40 });
+    expect(atFloor.status).toBe(200);
+    const detail = await request(app).get(`/api/v1/products/${productId}`).set(auth(owner.token));
+    expect(detail.body.data.product.currentStock).toBe(40);
+  });
+
+  it('leaves stock and ledger untouched when opening stock is not being edited', async () => {
+    const owner = await registerShop(app);
+    const productId = await makeProduct(owner);
+    const res = await request(app).patch(`/api/v1/products/${productId}`).set(auth(owner.token)).send({ sellingPrice: 270, openingStock: 46 });
+    expect(res.status).toBe(200);
+    const detail = await request(app).get(`/api/v1/products/${productId}`).set(auth(owner.token));
+    expect(detail.body.data.product.currentStock).toBe(46);
+    expect(detail.body.data.product.sellingPriceMinor).toBe(27000);
+    const ledger = await request(app).get(`/api/v1/products/${productId}/inventory`).set(auth(owner.token));
+    expect(ledger.body.data.length).toBe(1); // no correction for an unchanged value
+  });
+
+  it('does not count conversions as opening stock', async () => {
+    const owner = await registerShop(app);
+    const milk = await makeProduct(owner, { name: 'Milk', openingStock: 100 });
+    const yogurt = await makeProduct(owner, { name: 'Yogurt', openingStock: 10 });
+    const conv = await request(app).post('/api/v1/conversions').set(auth(owner.token)).send({ sourceProductId: milk, targetProductId: yogurt, quantity: 50 });
+    expect(conv.status).toBe(201);
+
+    const m = await request(app).get(`/api/v1/products/${milk}`).set(auth(owner.token));
+    const y = await request(app).get(`/api/v1/products/${yogurt}`).set(auth(owner.token));
+    expect(m.body.data.product.openingStock).toBe(100);
+    expect(y.body.data.product.openingStock).toBe(10);
+  });
+
   it('filters low-stock products', async () => {
     const owner = await registerShop(app);
     const unitId = await getLitreUnitId(owner.token);

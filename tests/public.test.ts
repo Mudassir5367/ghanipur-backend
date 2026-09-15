@@ -46,6 +46,13 @@ describe('Public storefront (§27, §43)', () => {
     const detail = await request(app).get(`/api/v1/public/shops/ali-dairy/products/${productSlug}`);
     expect(detail.status).toBe(200);
     expect(detail.body.data.product.purchaseCostMinor).toBeUndefined();
+
+    // Purchase costing and suppliers are internal too.
+    for (const p of [list.body.data.products[0], detail.body.data.product]) {
+      expect(p.avgCostMinor).toBeUndefined();
+      expect(p.costBasisMinor).toBeUndefined();
+      expect(p.supplier).toBeUndefined();
+    }
   });
 
   it('404s a pending/suspended shop on the storefront', async () => {
